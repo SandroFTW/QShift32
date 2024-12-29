@@ -20,7 +20,7 @@ They can withstand high voltages and high current and are configured to pull dow
 - Pit limiter and launch control possible in the future
 
 ## Development progress
-### 29.12.2024
+### 28.12.2024
 - R1 pcb assembled
 - first successful tests of retarding ignition pulses (only on the bench)
 
