@@ -28,3 +28,5 @@ They can withstand high voltages and high current and are configured to pull dow
 - Debug code on the bench to prevent coils from burning
 - Build a new wiring harness to connect to the bike
 - Do some test runs before adding the web configuration interface and other confort features of quickshiftuino
+
+The pulse measurement and IGBT switching schematic and some parts of the code were inspired by the "DIY Quickshifter" series by Gil Vargas on YouTube. He explains all the steps in great detail.
