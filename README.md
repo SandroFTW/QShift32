@@ -9,6 +9,8 @@ That topology works great, is fairly simple and reliable, but doesn't allow for 
 It instead offers 4 independent channels switched by IGBTs on the low side.
 They can withstand high voltages and high current and are configured to pull down the low side of the ignition coil.
 
+https://youtu.be/TwFzDqyh4EY
+
 <img src='images/pcb_r1.png' width='350'>
 
 ## New possibilities
