@@ -8,18 +8,24 @@ That topology works great, is fairly simple and reliable, but doesn't allow for 
 "QShift32" uses all the thoroughly tested sub-circuits of "quickshiftuino" except the power switching components.
 It instead offers 4 independent channels switched by IGBTs on the low side.
 They can withstand high voltages and high current and are configured to pull down the low side of the ignition coil.
+This can either be used to fully prevent sparks from firing or delay them by a precise time to achieve an ignition retard.
 
-https://youtu.be/TwFzDqyh4EY
+Demonstration Video (YouTube):
+
+[![Demonstration video](https://img.youtube.com/vi/TwFzDqyh4EY/0.jpg)](https://www.youtube.com/watch?v=TwFzDqyh4EY)
+
+R1 PCB 3D model
 
 <img src='images/pcb_r1.png' width='350'>
 
 ## New possibilities
-- RPM measurement even during power cut
-- Precise dwell time measurement for each channel
-- Ignition timing retard instead of ignition coil power cut to allow clutchless shifting
+- RPM measurement even during power cut (not during spark cut, only ignition retard)
+- Either ignition timing retard or full spark cut to allow clutchless shifting
 - Smooth control over engine power transitions -> extremely smooth shifts
+- Ignition timing retard will smoothly go back to normal operation after shift is done
 - During upshift period fuel gets ignited in the exhaust instead of remaining unburnt (-> pops and flames)
 - Pit limiter and launch control possible in the future
+- Precise dwell time measurement for each channel
 
 ## Development progress
 ### 28.12.2024
@@ -31,8 +37,9 @@ https://youtu.be/TwFzDqyh4EY
 <img src='images/cut_retard_smooth_waveform.png' width='350'>
 
 ## Next steps
-- Debug code on the bench to prevent coils from burning
-- Build a new wiring harness to connect to the bike
-- Do some test runs before adding the web configuration interface and other confort features of quickshiftuino
+- Find a way of controlling multiple channels simultaneously with a single timer
+- Gain more road experience for different settings
+- Fix a small error on R1 pcb so R2 can be released
 
-The pulse measurement and IGBT switching schematic and some parts of the code were inspired by the "DIY Quickshifter" series by Gil Vargas on YouTube. He explains all the steps in great detail.
+The pulse measurement and IGBT switching schematic and some parts of the code were inspired by the "DIY Quickshifter" series by Gil Vargas on YouTube.
+He explains all the steps in great detail.
