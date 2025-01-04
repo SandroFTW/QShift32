@@ -25,6 +25,10 @@ https://youtu.be/TwFzDqyh4EY
 ### 28.12.2024
 - R1 pcb assembled
 - first successful tests of retarding ignition pulses (only on the bench)
+### 04.01.2025
+- New option to do a full ignition cut instead of retarding timing
+- Still smoothly brings back the engine power after shifting
+<img src='images/cut_retard_smooth_waveform.png' width='350'>
 
 ## Next steps
 - Debug code on the bench to prevent coils from burning
