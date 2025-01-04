@@ -18,11 +18,10 @@ WebSocketsServer webSocket = WebSocketsServer(81);
 volatile unsigned long currTime          = 0;     // current timestamp in 1 ms steps (1 kHz)
 volatile unsigned long dwellBeginTime[4] = {0};   // time of last dwell start in µs steps
 volatile unsigned long lastDwellTime[4]  = {0};   // duration of last dwell pulse in µs steps
+volatile unsigned long lastRPMdelta[4]   = {0};   // Stores time bewteen two ignition pulses, needed for RPM calculation
 volatile bool lastMeasureState[4]        = {0};   // last state of the filtered coil state input
-volatile int lastCutChannel[4]           = {0};                     // Ignition channel that was last delayed (allows 4 channels running on 1 timer)
 volatile bool shiftingTrig               = false; // Controls whether ignition is retarded
 volatile int currRetard                  = 0;     // Used for gradual ignition retard recovery to normal operation
-volatile unsigned long lastRPMdelta      = 0;     // Stores time bewteen two ignition pulses, needed for RPM calculation
 
 static unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
 static unsigned long lastRead            = 0;     // When was the last ADC sensor reading (50 Hz)
@@ -37,6 +36,7 @@ static bool waitHyst                     = true;  // Needs to be low before anot
 hw_timer_t *t0_time = NULL;
 hw_timer_t *t1_cut  = NULL;
 hw_timer_t *t2_cut  = NULL;
+hw_timer_t *t3_cut  = NULL;
 
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
@@ -56,18 +56,25 @@ String params = "["
   "'default':''"
   "},"
   "{"
-  "'name':'retard',"
-  "'label':'Ignition Retard (deg)',"
+  "'name':'retardMin',"
+  "'label':'Ignition Retard Min (deg)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':90,"
-  "'default':'40'"
+  "'default':'50'"
+  "},"
+  "{"
+  "'name':'retardMax',"
+  "'label':'Ignition Retard Max (deg)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':90,"
+  "'default':'60'"
   "},"
   "{"
   "'name':'restore',"
   "'label':'Ignition Restore (deg/rev)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':9999,"
-  "'default':'10'"
+  "'default':'15'"
   "},"
   "{"
   "'name':'minRPM',"
@@ -95,7 +102,13 @@ String params = "["
   "'label':'Cut Time Max (ms)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':200,"
-  "'default':'60'"
+  "'default':'58'"
+  "},"
+  "{"
+  "'name':'fullCut',"
+  "'label':'Full Ign Cut',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'1'"
   "},"
   "{"
   "'name':'deadTime',"
@@ -109,14 +122,14 @@ String params = "["
   "'label':'Cut Sensitivity (0-4095)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':5000,"
-  "'default':'850'"
+  "'default':'950'"
   "},"
   "{"
   "'name':'cutHyst',"
   "'label':'Cut Hysteresis (0-4095)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':5000,"
-  "'default':'350'"
+  "'default':'500'"
   "}"
   "]";
 
@@ -128,7 +141,8 @@ struct cfgOptions
   char ssid[32];
   char password[32];
 
-  float retard;
+  float retardMin;
+  float retardMax;
   int restore;
 
   int minRPM;
@@ -136,6 +150,9 @@ struct cfgOptions
 
   int cutTimeMin;
   int cutTimeMax;
+
+  bool fullCut;
+
   int deadTime;
   int cutSens;
   int cutHyst;
@@ -143,7 +160,8 @@ struct cfgOptions
 
 void transferWebconfToStruct(String results)
 {
-  cfg.retard = conf.getInt("retard");          // TODO: Make this dependant on RPM (e.g. 25 at low RPM, 40 at high RPM)
+  cfg.retardMin = conf.getInt("retardMin");
+  cfg.retardMax = conf.getInt("retardMax"); 
   cfg.restore = conf.getInt("restore");        // TODO: Think how this is affected by cylinder/coil count with wasted spark          // TODO: does this also need to be float and just subtracted from retard value?
 
   cfg.minRPM = conf.getInt("minRPM");
@@ -151,6 +169,9 @@ void transferWebconfToStruct(String results)
 
   cfg.cutTimeMin = conf.getInt("cutTimeMin");
   cfg.cutTimeMax = conf.getInt("cutTimeMax");
+
+  cfg.fullCut = conf.getBool("fullCut");
+
   cfg.deadTime = conf.getInt("deadTime");
   cfg.cutSens = conf.getInt("cutSens");
   cfg.cutHyst = conf.getInt("cutHyst");
@@ -224,11 +245,15 @@ void IRAM_ATTR on_t0_time()
 // Gets executed when (lastDwell + calculated delay) passed after shifting
 void IRAM_ATTR on_t1_cut()
 {
-  digitalWrite(IGBT_PINS[lastCutChannel[0]], HIGH);
+  digitalWrite(IGBT_PINS[0], HIGH);
 }
 void IRAM_ATTR on_t2_cut()
 {
-  digitalWrite(IGBT_PINS[lastCutChannel[1]], HIGH);
+  digitalWrite(IGBT_PINS[1], HIGH);
+}
+void IRAM_ATTR on_t3_cut()
+{
+  digitalWrite(IGBT_PINS[2], HIGH);
 }
 
 // Channel 1 - When ECU changes state of coil (pull low or release)
@@ -240,7 +265,7 @@ void IRAM_ATTR onPC0()
   // When ECU pulls coil to ground (rising edge on logic signal)
   if (bPin && !lastMeasureState[0])
   {
-    lastRPMdelta = lTime - dwellBeginTime[0];
+    lastRPMdelta[0] = lTime - dwellBeginTime[0];
 
     if (!shiftingTrig && currRetard > 0)                                             // TODO: Needed on all 4 channels or only when channel 1 triggers?
     {
@@ -251,10 +276,15 @@ void IRAM_ATTR onPC0()
     dwellBeginTime[0] = lTime;
 
     // Either actively retarding ignition or recovering
-    if (shiftingTrig || currRetard > 0)
+    if (currRetard > 0)
     {
+      if (shiftingTrig && cfg.fullCut)
+      {
+        delayForRetard += ((currCutTime*100 / lastRPMdelta[0]) + 1) * lastRPMdelta[0];
+        shiftingTrig = false;
+      }
+
       digitalWrite(IGBT_PINS[0], LOW); // Close IGBT
-      lastCutChannel[0] = 0;
       timerWrite(t1_cut, 0);
       timerAlarm(t1_cut, lastDwellTime[0] + delayForRetard, false, 0);
     }
@@ -277,13 +307,20 @@ void IRAM_ATTR onPC1()
   // When ECU pulls coil to ground (rising edge on logic signal)
   if (bPin && !lastMeasureState[1])
   {
+    lastRPMdelta[1] = lTime - dwellBeginTime[1];
+
     unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[1]);
     dwellBeginTime[1] = lTime;
 
-    if (shiftingTrig || currRetard > 0)
+    if (currRetard > 0)
     {
+      if (shiftingTrig && cfg.fullCut)
+      {
+        delayForRetard += ((currCutTime*100 / lastRPMdelta[1]) + 1) * lastRPMdelta[1];
+        shiftingTrig = false;
+      }
+
       digitalWrite(IGBT_PINS[1], LOW); // Close IGBT
-      lastCutChannel[1] = 1;
       timerWrite(t2_cut, 0);
       timerAlarm(t2_cut, lastDwellTime[1] + delayForRetard, false, 0);
     }
@@ -306,15 +343,22 @@ void IRAM_ATTR onPC2()
   // When ECU pulls coil to ground (rising edge on logic signal)
   if (bPin && !lastMeasureState[2])
   {
+    lastRPMdelta[2] = lTime - dwellBeginTime[2];
+
     unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[2]);
     dwellBeginTime[2] = lTime;
 
-    if (shiftingTrig || currRetard > 0)
+    if (currRetard > 0)
     {
+      if (shiftingTrig && cfg.fullCut)
+      {
+        delayForRetard += ((currCutTime*100 / lastRPMdelta[2]) + 1) * lastRPMdelta[2];
+        shiftingTrig = false;
+      }
+
       digitalWrite(IGBT_PINS[2], LOW); // Close IGBT
-      lastCutChannel[2] = 2;
-      timerWrite(t1_cut, 0);
-      timerAlarm(t1_cut, lastDwellTime[2] + delayForRetard, false, 0);
+      timerWrite(t3_cut, 0);
+      timerAlarm(t3_cut, lastDwellTime[2] + delayForRetard, false, 0);
     }
   }
   // When ECU releases coil (falling edge on logic signal)
@@ -326,34 +370,34 @@ void IRAM_ATTR onPC2()
   lastMeasureState[2] = bPin;
 }
 
+// ########## DISABLED FOR NOW ##########
 // Channel 4 - When ECU changes state of coil (pull low or release)
-void IRAM_ATTR onPC3()
-{
-  bool bPin = digitalRead(MEASURE_PINS[3]); // Measurement Pin
-  unsigned long lTime = currTime;
+// void IRAM_ATTR onPC3()
+// {
+//   bool bPin = digitalRead(MEASURE_PINS[3]); // Measurement Pin
+//   unsigned long lTime = currTime;
 
-  // When ECU pulls coil to ground (rising edge on logic signal)
-  if (bPin && !lastMeasureState[3])
-  {
-    unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[3]);
-    dwellBeginTime[3] = lTime;
+//   // When ECU pulls coil to ground (rising edge on logic signal)
+//   if (bPin && !lastMeasureState[3])
+//   {
+//     unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[3]);
+//     dwellBeginTime[3] = lTime;
 
-    if (shiftingTrig || currRetard > 0)
-    {
-      digitalWrite(IGBT_PINS[3], LOW); // Close IGBT
-      lastCutChannel[3] = 3;
-      timerWrite(t1_cut, 0);
-      timerAlarm(t1_cut, lastDwellTime[3] + delayForRetard, false, 0);
-    }
-  }
-  // When ECU releases coil (falling edge on logic signal)
-  else if (!bPin && !shiftingTrig && currRetard == 0 && dwellBeginTime[3])
-  {
-    lastDwellTime[3] = lTime - dwellBeginTime[3];
-  }
+//     if (shiftingTrig || currRetard > 0)
+//     {
+//       digitalWrite(IGBT_PINS[3], LOW); // Close IGBT
+//       timerWrite(t1_cut, 0);
+//       timerAlarm(t1_cut, lastDwellTime[3] + delayForRetard, false, 0);
+//     }
+//   }
+//   // When ECU releases coil (falling edge on logic signal)
+//   else if (!bPin && !shiftingTrig && currRetard == 0 && dwellBeginTime[3])
+//   {
+//     lastDwellTime[3] = lTime - dwellBeginTime[3];
+//   }
 
-  lastMeasureState[3] = bPin;
-}
+//   lastMeasureState[3] = bPin;
+// }
 
 void setup()
 {
@@ -392,9 +436,13 @@ void setup()
   t2_cut = timerBegin(100000);
   timerAttachInterrupt(t2_cut, &on_t2_cut);
 
+  // Timer 3, Cut, 100 kHz -> 10 µs resolution
+  t3_cut = timerBegin(100000);
+  timerAttachInterrupt(t3_cut, &on_t3_cut);
+
   // Attach interrupts to MEASURE_PINS[i]
-  void (*pcFuncs[4])() = {onPC0, onPC1, onPC2, onPC3};
-  for (int i = 0; i < 4; i++) {
+  void (*pcFuncs[4])() = {onPC0, onPC1, onPC2}; // onPC3
+  for (int i = 0; i < 3; i++) { // i < 4
     attachInterrupt(digitalPinToInterrupt(MEASURE_PINS[i]), pcFuncs[i], CHANGE);
   }
 
@@ -432,7 +480,7 @@ void loop()
       pressureValue = analogRead(HALL_PINS[0]);
       //Serial.println(pressureValue);
 
-      lastRPM = 6000000 / lastRPMdelta;
+      lastRPM = 6000000 / lastRPMdelta[0];
 
       lastRead = currTime;
     }
@@ -446,7 +494,7 @@ void loop()
     if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && (currTime - lastCut) >= cfg.deadTime*100)
     {
       shiftingTrig = true;
-      currRetard = cfg.retard;
+      currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardMin, cfg.retardMax);
       currCutTime = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.cutTimeMax, cfg.cutTimeMin);
 
       waitHyst = true;
