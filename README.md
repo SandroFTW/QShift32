@@ -10,11 +10,11 @@ It instead offers 4 independent channels switched by IGBTs on the low side.
 They can withstand high voltages and high current and are configured to pull down the low side of the ignition coil.
 This can either be used to fully prevent sparks from firing or delay them by a precise time to achieve an ignition retard.
 
-Demonstration Video (YouTube):
+<ins>Demonstration Video (YouTube, click image):</ins>
 
 [![Demonstration video](https://img.youtube.com/vi/TwFzDqyh4EY/0.jpg)](https://www.youtube.com/watch?v=TwFzDqyh4EY)
 
-R1 PCB 3D model
+<ins>R1 PCB 3D model</ins>
 
 <img src='images/pcb_r1.png' width='350'>
 
