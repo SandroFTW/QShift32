@@ -1,6 +1,7 @@
 /* TODO:
-  - Use multiple timers for 4 ignition channels to prevent issues because of dwell time overlap
+  - Rewrite so each Channel doesn't need its own timer
   - Implement volatile unsigned long lowStartTime[4] -> Prevent coils from overheating because of extended dwell time > ~200ms
+  - Make RPM limiter code cleaner
 */
 
 #include <WebSocketsServer.h>
@@ -21,6 +22,7 @@ volatile unsigned long lastDwellTime[4]  = {0};   // duration of last dwell puls
 volatile unsigned long lastRPMdelta[4]   = {0};   // Stores time bewteen two ignition pulses, needed for RPM calculation
 volatile bool lastMeasureState[4]        = {0};   // last state of the filtered coil state input
 volatile bool shiftingTrig               = false; // Controls whether ignition is retarded
+volatile bool limitingRPM                = false; // Temporarily changes restore time to 999 while RPM limiting
 volatile int currRetard                  = 0;     // Used for gradual ignition retard recovery to normal operation
 
 static unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
@@ -30,6 +32,7 @@ static unsigned long lastCut             = 0;     // temporary R&D helper for on
 static int currCutTime                   = 0;     // Interpolated cutTime based on current RPM and min/max time
 static int lastRPM                       = 0;
 static int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
+static bool buttonPressed                = false; // Handlebar button
 static bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
 
 // Timer instances
@@ -57,79 +60,112 @@ String params = "["
   "},"
   "{"
   "'name':'retardMin',"
-  "'label':'Ignition Retard Min (deg)',"
+  "'label':'Ignition Retard - Low RPM (deg)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':90,"
-  "'default':'50'"
+  "'min':0,'max':180,"
+  "'default':'80'"
   "},"
   "{"
   "'name':'retardMax',"
-  "'label':'Ignition Retard Max (deg)',"
+  "'label':'Ignition Retard - High RPM (deg)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':90,"
-  "'default':'60'"
+  "'min':0,'max':180,"
+  "'default':'110'"
   "},"
   "{"
   "'name':'restore',"
   "'label':'Ignition Restore (deg/rev)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':9999,"
-  "'default':'15'"
+  "'default':'25'"
   "},"
   "{"
   "'name':'minRPM',"
   "'label':'Min RPM (1/min)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':20000,"
-  "'default':'2500'"
+  "'min':1000,'max':20000,"
+  "'default':'3000'"
   "},"
   "{"
   "'name':'maxRPM',"
   "'label':'Max RPM (1/min)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':1000,'max':20000,"
+  "'min':2000,'max':20000,"
   "'default':'12500'"
   "},"
   "{"
-  "'name':'cutTimeMin',"
-  "'label':'Cut Time Min (ms)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':200,"
-  "'default':'52'"
-  "},"
-  "{"
   "'name':'cutTimeMax',"
-  "'label':'Cut Time Max (ms)',"
+  "'label':'Cut Time - Low RPM (ms)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':200,"
-  "'default':'58'"
+  "'min':1,'max':200,"
+  "'default':'54'"
   "},"
   "{"
-  "'name':'fullCut',"
-  "'label':'Full Ign Cut',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'1'"
+  "'name':'cutTimeMin',"
+  "'label':'Cut Time - High RPM (ms)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':200,"
+  "'default':'48'"
   "},"
   "{"
   "'name':'deadTime',"
   "'label':'Dead Time (ms)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':5000,"
+  "'min':1,'max':5000,"
   "'default':'350'"
   "},"
   "{"
   "'name':'cutSens',"
-  "'label':'Cut Sensitivity (0-4095)',"
+  "'label':'Cut Sensitivity (1-4095)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':5000,"
-  "'default':'950'"
+  "'min':1,'max':5000,"
+  "'default':'1000'"
   "},"
   "{"
   "'name':'cutHyst',"
-  "'label':'Cut Hysteresis (0-4095)',"
+  "'label':'Cut Hysteresis (1-4095)',"
   "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':5000,"
+  "'min':1,'max':5000,"
   "'default':'500'"
+  "},"
+  "{"
+  "'name':'fullCut',"
+  "'label':'Full Ignition Cut',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'0'"
+  "},"
+  "{"
+  "'name':'wastedSpark',"
+  "'label':'Wasted Spark Setup',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'1'"
+  "},"
+  "{"
+  "'name':'limiterButton',"
+  "'label':'Limiter Push Button',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'1'"
+  "},"
+  "{"
+  "'name':'limiterRPM',"
+  "'label':'Limiter RPM (1/min)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':20000,"
+  "'default':'6000'"
+  "},"
+  "{"
+  "'name':'limiterCut',"
+  "'label':'Limiter Cut Gain (ms/100rpm)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':1000,"
+  "'default':'8'"
+  "},"
+  "{"
+  "'name':'limiterRetard',"
+  "'label':'Limiter Retard (deg)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':180,"
+  "'default':'50'"
   "}"
   "]";
 
@@ -148,14 +184,20 @@ struct cfgOptions
   int minRPM;
   int maxRPM;
 
-  int cutTimeMin;
   int cutTimeMax;
-
-  bool fullCut;
+  int cutTimeMin;
 
   int deadTime;
   int cutSens;
   int cutHyst;
+
+  bool fullCut;
+  int wastedSpark;
+
+  bool limiterButton;
+  int limiterRPM;
+  int limiterCut;
+  int limiterRetard;
 } cfg;
 
 void transferWebconfToStruct(String results)
@@ -167,14 +209,20 @@ void transferWebconfToStruct(String results)
   cfg.minRPM = conf.getInt("minRPM");
   cfg.maxRPM = conf.getInt("maxRPM");
 
-  cfg.cutTimeMin = conf.getInt("cutTimeMin");
   cfg.cutTimeMax = conf.getInt("cutTimeMax");
-
-  cfg.fullCut = conf.getBool("fullCut");
+  cfg.cutTimeMin = conf.getInt("cutTimeMin");
 
   cfg.deadTime = conf.getInt("deadTime");
   cfg.cutSens = conf.getInt("cutSens");
   cfg.cutHyst = conf.getInt("cutHyst");
+
+  cfg.fullCut = conf.getBool("fullCut");
+  cfg.wastedSpark = conf.getBool("wastedSpark") ? 1 : 0;
+
+  cfg.limiterButton = conf.getBool("limiterButton");
+  cfg.limiterRPM = conf.getInt("limiterRPM");
+  cfg.limiterCut = conf.getInt("limiterCut");
+  cfg.limiterRetard = conf.getInt("limiterRetard");
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -206,7 +254,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       valEl2.innerText = `RPM: ${val2}`;
       valEl3.innerText = `Last Dwell [0]: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
-      valEl4.innerText = `currentCutTime: ${val5}`;
+      valEl5.innerText = `currentCutTime: ${val5}`;
     };
   </script>
 </body>
@@ -267,12 +315,11 @@ void IRAM_ATTR onPC0()
   {
     lastRPMdelta[0] = lTime - dwellBeginTime[0];
 
-    if (!shiftingTrig && currRetard > 0)                                             // TODO: Needed on all 4 channels or only when channel 1 triggers?
-    {
-      currRetard = max(0, currRetard - cfg.restore);
-    }
+    unsigned int delayForRetard = (currRetard / (cfg.wastedSpark ? 360.f : 720.f)) * (lTime - dwellBeginTime[0]); // TODO: optimize this
 
-    unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[0]);
+    if (!shiftingTrig && currRetard > 0)                                             // TODO: Needed on all 4 channels or only when channel 1 triggers?
+      currRetard = max(0, currRetard - cfg.restore);
+
     dwellBeginTime[0] = lTime;
 
     // Either actively retarding ignition or recovering
@@ -309,7 +356,7 @@ void IRAM_ATTR onPC1()
   {
     lastRPMdelta[1] = lTime - dwellBeginTime[1];
 
-    unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[1]);
+    unsigned int delayForRetard = (currRetard / (cfg.wastedSpark ? 360.f : 720.f)) * (lTime - dwellBeginTime[1]);
     dwellBeginTime[1] = lTime;
 
     if (currRetard > 0)
@@ -345,7 +392,7 @@ void IRAM_ATTR onPC2()
   {
     lastRPMdelta[2] = lTime - dwellBeginTime[2];
 
-    unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[2]);
+    unsigned int delayForRetard = (currRetard / (cfg.wastedSpark ? 360.f : 720.f)) * (lTime - dwellBeginTime[2]);
     dwellBeginTime[2] = lTime;
 
     if (currRetard > 0)
@@ -478,9 +525,10 @@ void loop()
     if ((currTime - lastRead) >= 2000)
     {
       pressureValue = analogRead(HALL_PINS[0]);
+      buttonPressed = !digitalRead(HALL_PINS[1]);
       //Serial.println(pressureValue);
-
-      lastRPM = 6000000 / lastRPMdelta[0];
+      if (lastRPMdelta[0] > 0)
+        lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
 
       lastRead = currTime;
     }
@@ -491,7 +539,32 @@ void loop()
     if (lastRPM < cfg.minRPM)
       waitHyst = true;
 
-    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && (currTime - lastCut) >= cfg.deadTime*100)
+    // 2-step launch control
+    if (cfg.limiterRPM && cfg.limiterCut && cfg.limiterRetard)
+    {
+      if ((!cfg.limiterButton || buttonPressed) && !shiftingTrig)
+      {
+        if (lastRPM > cfg.limiterRPM)
+        {
+          limitingRPM = true;
+          shiftingTrig = true;
+          waitHyst = true;
+          currRetard = cfg.limiterRetard;
+          currCutTime = (int)((lastRPM - cfg.limiterRPM) * cfg.limiterCut / 100.f); // rpmError * gain
+          cfg.restore = (int)(cfg.limiterRetard / 2);
+          cfg.fullCut = true;
+        }
+      }
+      else
+      {
+        limitingRPM = false;
+        shiftingTrig = false;
+        cfg.restore = conf.getInt("restore");
+        cfg.fullCut = conf.getBool("fullCut");
+      }
+    }
+
+    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*100)
     {
       shiftingTrig = true;
       currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardMin, cfg.retardMax);
@@ -504,7 +577,7 @@ void loop()
       lastCut = currTime;
     }
 
-    if (shiftingTrig && (currTime - lastCut) >= currCutTime*100)
+    if (shiftingTrig && !limitingRPM && (currTime - lastCut) >= currCutTime*100)
     {
       shiftingTrig = false;
       digitalWrite(GREEN_PIN, HIGH); // Off
