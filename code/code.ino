@@ -1,7 +1,9 @@
 /* TODO:
+  - Maybe add some kind of detection for cylinder count (of course only while engine is running) so cfg.restore gets scaled accordingly (makes config more generally usable)
   - Rewrite so each Channel doesn't need its own timer
+    -> meh, semi fixed by removing the need for a seperate timekeeping timer so all 4 timers can be used for qs channels
   - Implement volatile unsigned long lowStartTime[4] -> Prevent coils from overheating because of extended dwell time > ~200ms
-  - Make RPM limiter code cleaner
+  - Make RPM limiter code cleaner and actually work while driving
 */
 
 #include <WebSocketsServer.h>
@@ -16,7 +18,7 @@
 WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Global variables
-volatile unsigned long currTime          = 0;     // current timestamp in 1 ms steps (1 kHz)
+volatile unsigned long currTime          = 0;     // current timestamp in 1 µs steps (1 MHz)
 volatile unsigned long dwellBeginTime[4] = {0};   // time of last dwell start in µs steps
 volatile unsigned long lastDwellTime[4]  = {0};   // duration of last dwell pulse in µs steps
 volatile unsigned long lastRPMdelta[4]   = {0};   // Stores time bewteen two ignition pulses, needed for RPM calculation
@@ -37,8 +39,7 @@ static bool buttonPressed                = false;  // Handlebar button
 static bool waitHyst                     = true;   // Needs to be low before another upshift is allowed
 
 // Timer instances
-hw_timer_t *t0_time = NULL;
-hw_timer_t *t_cut[3]  = {NULL, NULL, NULL};
+hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
 
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
@@ -58,11 +59,16 @@ String params = "["
   "'default':''"
   "},"
   "{"
+  "'name':'category1',"
+  "'label':'Quickshifter Settings',"
+  "'type':"+String(CATEGORY)+""
+  "},"
+  "{"
   "'name':'retardLow',"
   "'label':'Ignition Retard - Low RPM (deg)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':180,"
-  "'default':'40'"
+  "'default':'35'"
   "},"
   "{"
   "'name':'retardHigh',"
@@ -76,7 +82,7 @@ String params = "["
   "'label':'Restore Smoothness (Ign Pulses)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':1000,"
-  "'default':'10'"
+  "'default':'20'"
   "},"
   "{"
   "'name':'minRPM',"
@@ -97,14 +103,14 @@ String params = "["
   "'label':'Cut Time - Low RPM (ms)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':1000,"
-  "'default':'44'"
+  "'default':'50'"
   "},"
   "{"
   "'name':'holdTimeHigh',"
   "'label':'Cut Time - High RPM (ms)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':1000,"
-  "'default':'50'"
+  "'default':'70'"
   "},"
   "{"
   "'name':'deadTime',"
@@ -140,6 +146,11 @@ String params = "["
   "'default':'1'"
   "},"
   "{"
+  "'name':'category2',"
+  "'label':'2-Step RPM Limiter',"
+  "'type':"+String(CATEGORY)+""
+  "},"
+  "{"
   "'name':'limiterButton',"
   "'label':'Limiter Require Button',"
   "'type':"+String(INPUTCHECKBOX)+","
@@ -149,7 +160,7 @@ String params = "["
   "'name':'limiterFullCut',"
   "'label':'Limiter Full Cut',"
   "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'1'"
+  "'default':'0'"
   "},"
   "{"
   "'name':'limiterRPM',"
@@ -163,21 +174,21 @@ String params = "["
   "'label':'Limiter Cut Gain (ms/100rpm)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':1000,"
-  "'default':'10'"
+  "'default':'15'"
   "},"
   "{"
   "'name':'limiterRetard',"
   "'label':'Limiter Retard (deg)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':180,"
-  "'default':'35'"
+  "'default':'40'"
   "},"
   "{"
   "'name':'limiterDiv',"
   "'label':'Limiter Restore Divisor',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':20,"
-  "'default':'2'"
+  "'default':'1'"
   "}"
   "]";
 
@@ -272,7 +283,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       const [val1, val2, val3, val4, val5, val6, val7] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
-      valEl3.innerText = `Last Dwell [0]: ${val3}`;
+      valEl3.innerText = `Last Dwell (us) [0]: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
@@ -295,7 +306,7 @@ void push_debug(void *parameters)
   for (;;)
   {
     // pressure, rpm, lastdwell, xtal_time
-    String broadcastString = String(pressureValue) + "," + String(lastRPM) + "," + String(lastDwellTime[0] * 10) + "," + String(currRetard) + "," + String(currHoldTime) + "," + String(currRestore) + "," + (shiftingTrig ? "true" : "false");
+    String broadcastString = String(pressureValue) + "," + String(lastRPM) + "," + String(lastDwellTime[0]) + "," + String(currRetard) + "," + String(currHoldTime) + "," + String(currRestore) + "," + (shiftingTrig ? "true" : "false");
 
     webSocket.loop();
     webSocket.broadcastTXT(broadcastString);
@@ -306,40 +317,38 @@ void push_debug(void *parameters)
 
 
 
-// Count in 1 ms steps (1 kHz)
-void IRAM_ATTR on_t0_time()
-{
-  currTime++;
-}
-
 // Gets executed when (lastDwell + calculated delay) passed after shifting
-void IRAM_ATTR on_t1_cut()
+void IRAM_ATTR on_t0_cut()
 {
   digitalWrite(IGBT_PINS[0], HIGH);
 }
-void IRAM_ATTR on_t2_cut()
+void IRAM_ATTR on_t1_cut()
 {
   digitalWrite(IGBT_PINS[1], HIGH);
 }
-void IRAM_ATTR on_t3_cut()
+void IRAM_ATTR on_t2_cut()
 {
   digitalWrite(IGBT_PINS[2], HIGH);
+}
+void IRAM_ATTR on_t3_cut()
+{
+  digitalWrite(IGBT_PINS[3], HIGH);
 }
 
 // When ECU changes state of coil (pull low or release)
 void coilInterrupt(int ch)
 {
   bool bPin = digitalRead(MEASURE_PINS[ch]); // Measurement Pin
-  unsigned long lTime = currTime;
+  unsigned long lTime = micros();                                                 // TODO: Can this be made more efficient?
 
   // When ECU pulls coil to ground (rising edge on logic signal)
   if (bPin && !lastMeasureState[ch])
   {
     lastRPMdelta[ch] = lTime - dwellBeginTime[ch];
 
-    unsigned int delayForRetard = (currRetard / 360.f) * (lTime - dwellBeginTime[ch]); // TODO: optimize this // cfg.wastedSpark
+    unsigned long delayForRetard = (currRetard / cfg.wastedSpark) * (lTime - dwellBeginTime[ch]);
 
-    if (!shiftingTrig && currRetard > 0) {                                             // TODO: Needed on all 4 channels or only when channel 1 triggers?
+    if (!shiftingTrig && currRetard > 0) {
       currRetard = max(0, currRetard - currRestore);
     }
 
@@ -350,7 +359,7 @@ void coilInterrupt(int ch)
     {
       if (shiftingTrig && cfg.fullCut)
       {
-        delayForRetard += ((currHoldTime*100 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
+        delayForRetard += ((currHoldTime*1000 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
         shiftingTrig = false;
       }
 
@@ -371,9 +380,7 @@ void coilInterrupt(int ch)
 void IRAM_ATTR onPC0() { coilInterrupt(0); }
 void IRAM_ATTR onPC1() { coilInterrupt(1); }
 void IRAM_ATTR onPC2() { coilInterrupt(2); }
-
-// ########## DISABLED FOR NOW ##########
-// Channel 4
+void IRAM_ATTR onPC3() { coilInterrupt(3); }
 
 void setup()
 {
@@ -399,20 +406,15 @@ void setup()
     pinMode(MEASURE_PINS[i], INPUT_PULLUP);                 // TODO: Does this need to be pullup?
   }
 
-  // Timer 0, Time, 100 kHz -> 10 µs resolution
-  t0_time = timerBegin(100000);
-  timerAttachInterrupt(t0_time, &on_t0_time);
-  timerAlarm(t0_time, 1, true, 0); // Trigger interrupt every 10 µs (100 kHz)
-
-  void (*on_cut_funcs[4])() = {on_t1_cut, on_t2_cut, on_t3_cut};
-  for (int i = 0; i < 3; i++) {
-    t_cut[i] = timerBegin(100000);
+  void (*on_cut_funcs[4])() = {on_t0_cut, on_t1_cut, on_t2_cut, on_t3_cut};
+  for (int i = 0; i < 4; i++) {
+    t_cut[i] = timerBegin(1000000);
     timerAttachInterrupt(t_cut[i], on_cut_funcs[i]);
   }
 
   // Attach interrupts to MEASURE_PINS[i]
-  void (*pcFuncs[4])() = {onPC0, onPC1, onPC2}; // onPC3
-  for (int i = 0; i < 3; i++) { // i < 4
+  void (*pcFuncs[4])() = {onPC0, onPC1, onPC2, onPC3};
+  for (int i = 0; i < 4; i++) {
     attachInterrupt(digitalPinToInterrupt(MEASURE_PINS[i]), pcFuncs[i], CHANGE);
   }
 
@@ -441,17 +443,21 @@ void setup()
 
 void loop()
 {
+  // 1 µs precision (1 MHz)
+  currTime = micros();
+
   // Run every 1 ms (1 kHz)
-  if ((currTime - lastCycle) >= 100)
+  if ((currTime - lastCycle) >= 1000)
   {
     // Read ADC sensors every 20 ms (50 Hz)
-    if ((currTime - lastRead) >= 2000)
+    if ((currTime - lastRead) >= 20000)
     {
       pressureValue = analogRead(HALL_PINS[0]);
       buttonPressed = !digitalRead(HALL_PINS[1]);
       //Serial.println(pressureValue);
       if (lastRPMdelta[0] > 0)
-        lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
+        lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];         // TODO: Change cfg.wastedSpark back to boolean, create global variable that stores 360 or 720 for onPCx functions but keeps this simple
+        //lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
 
       lastRead = currTime;
     }
@@ -483,13 +489,13 @@ void loop()
         if (limitingRPM)
         {
           limitingRPM = false;
-          shiftingTrig = false;   // ############################## OHHHH MANNNNNNN
+          shiftingTrig = false;   // ############################## OHHHH MANNNNNNN daran lags
           cfg.fullCut = conf.getBool("fullCut");
         }
       }
     }
 
-    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*100)
+    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*1000)
     {
       shiftingTrig = true;
       currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);                 // TODO: Make this logarithmic instead of linear (more change at low rpm, less change at high rpm)
@@ -504,7 +510,7 @@ void loop()
       lastCut = currTime;
     }
 
-    if (shiftingTrig && !limitingRPM && (currTime - lastCut) >= currHoldTime*100)
+    if (shiftingTrig && !limitingRPM && (currTime - lastCut) >= currHoldTime*1000)
     {
       shiftingTrig = false;
       digitalWrite(GREEN_PIN, HIGH); // Off
