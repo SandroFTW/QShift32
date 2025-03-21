@@ -28,8 +28,9 @@ R1 PCB 3D model:
 - Expandable to support shift light, handlebar buttons, gear indicator etc. in the future
 
 ## Development progress
-### 19.03.2025
-- 1000 km of successful road testing done
+### 21.03.2025
+- All 4 channels are working now (optimized timer allocation by using system timer)
+- 1500 km of successful road testing done
 - still working on perfecting the different configuration options
   to reduce complexity and improve shift quality
 - experimented with really low and really high retard values and smoothness factors:
@@ -50,10 +51,10 @@ R1 PCB 3D model:
 - first successful tests of retarding ignition pulses (only on the bench)
 
 ## Next steps
-- Find a way of controlling multiple channels simultaneously with a single timer
 - Implement rear wheel speed sensor reading (Gear indicator and automatic Launch mode exit)
 - Upload Gerber files and assembly info for PCB R2
 - Design a case that holds the PCB and connectors (ideally somewhat water splash proof)
+- Find a way of controlling multiple channels simultaneously with a single timer (low priority)
 
 The pulse measurement and IGBT switching schematic and some parts of the code were inspired by the "DIY Quickshifter" series by Gil Vargas on YouTube.
 He explains all the steps in great detail.
