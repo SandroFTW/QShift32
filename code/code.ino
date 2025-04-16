@@ -3,6 +3,10 @@
   - Rewrite so each Channel doesn't need its own timer
     -> meh, semi fixed by removing the need for a seperate timekeeping timer so all 4 timers can be used for qs channels
   - Implement volatile unsigned long lowStartTime[4] -> Prevent coils from overheating because of extended dwell time > ~200ms
+  - Think how cfg.restore is affected by cylinder/coil count with wasted spark (double the cylinder count needs double cfg.restore for same smoothness, change to float for more precision or unnecessary?)
+  - Rename cfg.wastedSpark to something that describes it better (crank degrees per ignition pulse per coil) (Change back to boolean, create global variable that stores 360 or 720 for coilInterrupt function but keeps this simple)
+  - Try to improve performance of coilInterrupt interrupt function (is micros() bad? less calculations)
+  - Make currRetard calculation logarithmic instead of linear (more change at low rpm, less change at high rpm, with configurable breakpoint percentage, maybe see throttle expo in betaflight)
 */
 
 #include <WebSocketsServer.h>
@@ -10,16 +14,28 @@
 #include <AsyncWebConfig.h>
 #include <esp_wifi.h>
 #include <AsyncTCP.h>
+#include <esp_now.h>
 #include <SPIFFS.h>
 #include <WiFi.h>
 
 #include <Arduino.h>
 
+uint8_t broadcastAddress[6];
+
+typedef struct sendData {
+  int currGear;
+  int currMode;
+};
+
+sendData sen;
+
+esp_now_peer_info_t peerInfo;
+
 WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Global variables
 volatile unsigned long currTime          = 0;     // current timestamp in 1 µs steps (1 MHz)
-volatile unsigned long speedPulses       = 0;     // Pulse count from the wheel speed sensor in the last interval (200 ms / 5 Hz)
+volatile unsigned long speedPulses       = 0;     // Pulse count from the wheel speed sensor in the last interval (500 ms / 2 Hz)
 volatile unsigned long dwellBeginTime[4] = {0};   // time of last dwell start in µs steps
 volatile unsigned long lastDwellTime[4]  = {0};   // duration of last dwell pulse in µs steps
 volatile unsigned long lastRPMdelta[4]   = {0};   // Stores time bewteen two ignition pulses, needed for RPM calculation
@@ -29,19 +45,28 @@ volatile bool limitingRPM                = false; // Temporarily changes restore
 volatile int currRetard                  = 0;     // Used for gradual ignition retard recovery to normal operation
 volatile int currRestore                 = 0;     // Calculated deg/ignition pulse recovery speed
 
-static unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
-static unsigned long lastRead            = 0;     // When was the last ADC sensor reading (50 Hz)
-static unsigned long lastCut             = 0;     // temporary R&D helper for on off toggling
-static unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed measurement (5 Hz)
+unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
+unsigned long lastRead            = 0;     // When was the last ADC sensor reading (50 Hz)
+unsigned long lastCut             = 0;     // When was the last ignition cut/retard begin
+unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed measurement (2 Hz)
 
-static int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
-static int lastRPM                       = 0;
-static int lastSpeed                     = 0;     // Measured rear wheel speed (1/min) (* 0.0917f -> km/h Grom)
-static int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
-static int limiterState                  = 0;     // Current state of RPM limiter mode
-static bool buttonPressed                = false; // Handlebar button state
-static bool lastButtonState              = false; // Last button state for edge detection
-static bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
+int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
+int lastRPM                       = 0;
+int lastWheelRPM                  = 0;     // Measured rear wheel speed (1/min)
+float lastWheelSpeed              = 0;     // Calculated rear wheel speed (km/h)
+int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
+int limiterState                  = 0;     // Current state of RPM limiter mode
+bool buttonPressed                = false; // Handlebar button state
+bool lastButtonState              = false; // Last button state for edge detection
+bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
+
+// Gear indicator
+//float gearRatios[6] = {2.5, 1.55, 1.15, 0.923, 0, 0};             // Grom gear ratios (Primary: * 3.35) = {8.375, 5.2, 3,85, 3.10, 999, 999}
+//float gearRatios[6] = {2.846, 1.947, 1.556, 1.333, 1.190, 1.083}; // XJ6 gear ratios (Primary: * 1.955) = {5.564, 3.806, 3.042, 2.606, 2.326, 2.117}
+float measuredRatio = 0.f;
+float filteredRatio = 0.f;
+float alpha         = 0.f;
+int currentGear     = 0; // 1-6, 0 = N
 
 char macAddr[20];
 
@@ -51,12 +76,11 @@ hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
 const int IGBT_PINS[4]    = {2, 3, 4, 1};
-//const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision
-const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins
+const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
+//const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom)
 
-const int WHEEL_PIN = 12;
+const int WHEEL_PIN = 15; // 12 on my grom, 15 on my xj6, 14 in new PCB revision
 const int PIEZO_PIN = 13;
-const int GPIO_PIN  = 12;
 const int GREEN_PIN = 5;
 const int RED_PIN   = 6;
 
@@ -65,6 +89,12 @@ enum lim {
   LAUNCH = 1,
   PIT = 2
 };
+
+void macStringToBytes(const char *macStr, uint8_t *macBytes)
+{
+    for (int i = 0; i < 6; i++)
+      macBytes[i] = strtoul(macStr + (i * 3), NULL, 16);
+}
 
 String params = "["
   "{"
@@ -104,7 +134,7 @@ String params = "["
   "'label':'Min RPM (1/min)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1000,'max':20000,"
-  "'default':'2950'"
+  "'default':'2900'"
   "},"
   "{"
   "'name':'maxRPM',"
@@ -166,8 +196,8 @@ String params = "["
   "'type':"+String(CATEGORY)+""
   "},"
   "{"
-  "'name':'limiterButton',"
-  "'label':'Limiter Require Button',"
+  "'name':'limiterAlways',"
+  "'label':'Limiter Always Active',"
   "'type':"+String(INPUTCHECKBOX)+","
   "'default':'1'"
   "},"
@@ -182,7 +212,7 @@ String params = "["
   "'label':'Limiter RPM (1/min)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':20000,"
-  "'default':'3500'"
+  "'default':'3600'"
   "},"
   "{"
   "'name':'launchRPM',"
@@ -203,7 +233,7 @@ String params = "["
   "'label':'Limiter Retard (deg)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':180,"
-  "'default':'25'"
+  "'default':'30'"
   "},"
   "{"
   "'name':'limiterDiv',"
@@ -252,9 +282,47 @@ String params = "["
   "},"
   "{"
   "'name':'speedScale',"
-  "'label':'Wheel RPM to Speed Factor',"
+  "'label':'Wheel Circumference (mm)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':20000,"
+  "'default':'1528'"                             // Grom 15/34 (Sprocket) * 1529 (Wheel Dia mm) = 675 (Distance per rear wheel rev)
+  "},"
+  "{"
+  "'name':'sensorPulses',"
+  "'label':'Pulses per Wheel Revolution',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':1000,"
+  "'default':'70'"
+  "},"
+  "{"
+  "'name':'category4',"
+  "'label':'Gear Indicator',"
+  "'type':"+String(CATEGORY)+""
+  "},"
+  "{"
+  "'name':'gearCount',"
+  "'label':'Gearbox Gear Count',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':6,"
+  "'default':'6'"
+  "},"
+  "{"
+  "'name':'gearRatios',"
+  "'label':'Gear Ratios (2.00, 1.85, ...)',"
   "'type':"+String(INPUTTEXT)+","
-  "'default':'0.092'"
+  "'default':'8.375, 5.2, 3,85, 3.10, 999, 999'"     // Grom 3.35 (Primary ratio) * Gearbox Ratio (2.5, 1.55, 1.15, 0.923)
+  "},"
+  "{"
+  "'name':'espNow',"
+  "'label':'Enable ESP-NOW Sending',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'1'"
+  "},"
+  "{"
+  "'name':'macAddr',"
+  "'label':'Receiver MAC Adress',"
+  "'type':"+String(INPUTTEXT)+","
+  "'default':'40:91:51:55:C5:9B'"
   "}"
   "]";
 
@@ -283,7 +351,7 @@ struct cfgOptions
   bool fullCut;
   float wastedSpark;
 
-  bool limiterButton;
+  bool limiterAlways;
   bool limiterFullCut;
   int limiterRPM;
   int launchRPM;
@@ -295,14 +363,20 @@ struct cfgOptions
   int pressureInput;
   int buttonInput;
   bool wheelSensor;
-  float speedScale;
+  int speedScale;
+  int sensorPulses;
+
+  int gearCount;
+  float gearRatios[6];
+  bool espNow;
+  String macAddr;
 } cfg;
 
 void transferWebconfToStruct(String results)
 {
   cfg.retardLow = conf.getInt("retardLow");
   cfg.retardHigh = conf.getInt("retardHigh"); 
-  cfg.restore = conf.getInt("restore");        // TODO: Think how this is affected by cylinder/coil count with wasted spark          // TODO: does this also need to be float and just subtracted from retard value?
+  cfg.restore = conf.getInt("restore");
 
   cfg.minRPM = conf.getInt("minRPM");
   cfg.maxRPM = conf.getInt("maxRPM");
@@ -315,9 +389,9 @@ void transferWebconfToStruct(String results)
   cfg.cutHyst = conf.getInt("cutHyst");
 
   cfg.fullCut = conf.getBool("fullCut");
-  cfg.wastedSpark = conf.getBool("wastedSpark") ? 360.f : 720.f;      // TODO: Rename maybe?
+  cfg.wastedSpark = conf.getBool("wastedSpark") ? 360.f : 720.f;
 
-  cfg.limiterButton = conf.getBool("limiterButton");
+  cfg.limiterAlways = conf.getBool("limiterAlways");
   cfg.limiterFullCut = conf.getBool("limiterFullCut");
   cfg.limiterRPM = conf.getInt("limiterRPM");
   cfg.launchRPM = conf.getInt("launchRPM");
@@ -344,7 +418,17 @@ void transferWebconfToStruct(String results)
     cfg.buttonInput = 2; // ADC 2
 
   cfg.wheelSensor = conf.getInt("wheelSensor");
-  cfg.speedScale = conf.getFloat("speedScale");
+  cfg.speedScale = conf.getInt("speedScale");
+  cfg.sensorPulses = conf.getInt("sensorPulses");
+
+  cfg.gearCount = conf.getInt("gearCount");
+
+  parseGearRatios(conf.getValue("gearRatios"));
+
+  cfg.espNow = conf.getBool("espNow");
+  cfg.macAddr = conf.getString("macAddr").c_str();
+
+  macStringToBytes(cfg.macAddr.c_str(), broadcastAddress);
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -363,10 +447,12 @@ const char debug_html[] PROGMEM = R"rawliteral(
   <p id="val4">...</p>
   <p id="val5">...</p>
   <p id="val6">...</p>
+  <br>
   <p id="val7">...</p>
   <p id="val8">...</p>
   <p id="val9">...</p>
   <p id="val10">...</p>
+  <br>
   <p id="val11">...</p>
   <script>
     const valEl1 = document.getElementById('val1');
@@ -390,7 +476,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
-      valEl7.innerText = `shiftingTrig: ${val7}`;
+      valEl7.innerText = `currentGear: ${val7}`;
       valEl8.innerText = `Gear Ratio: ${val8}`;
       valEl9.innerText = `Speed (km/h): ${val9}`;
       valEl10.innerText = `Limiter Mode: ${val10}`;
@@ -412,23 +498,65 @@ void push_debug(void *parameters)
 {
   for (;;)
   {
-    String sTrig = shiftingTrig ? "true" : "false";
-    float gRatio1 = lastRPM / ((float)lastSpeed + 0.0001f);
-    String gRatio = String(gRatio1 > 50 ? 0 : gRatio1);
-    String cSpeed = String(lastSpeed * cfg.speedScale);
+    //String sTrig = shiftingTrig ? "true" : "false";
+    String cGear = currentGear ? String(currentGear) : "N";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
-    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +      "," + String(lastDwellTime[0]) + ","
-                              + String(currRetard) +                "," + String(currHoldTime) + "," + String(currRestore) + ","
-                              + sTrig +                             "," + gRatio +               "," + cSpeed + ","
+    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastDwellTime[0]) + ","
+                              + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
+                              + cGear +                             "," + String(measuredRatio) + "," + String(lastWheelSpeed) + ","
                               + lMode +                             "," + String(macAddr);
+
+    if (cfg.espNow)
+    {
+      sen.currGear = currentGear;
+      sen.currMode = limiterState;
+      esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&sen, sizeof(sen)); // Send message via ESP-NOW
+    }
 
     webSocket.loop();
     webSocket.broadcastTXT(broadcastString);
 
-    delay(100);
+    delay(200);
   }
 }
+
+// Return the best matching gear for the given gear ratio
+int detectGear(float ratio)
+{
+    if (ratio > 20.0 || ratio < 0.3) return 0; // Assume neutral if ratio is excessively high (rear wheel stationary) or low (clutch pulled at high speed)
+    
+    int bestGear = 1;
+    float minDiff = abs(ratio - cfg.gearRatios[0]);
+    
+    for (int i = 1; i < cfg.gearCount; i++) {
+        float diff = abs(ratio - cfg.gearRatios[i]);
+        if (diff < minDiff) {
+            minDiff = diff;
+            bestGear = i + 1;
+        }
+    }
+    return bestGear;
+}
+
+void parseGearRatios(const String& input)
+{
+  char buf[64];
+  input.toCharArray(buf, sizeof(buf));
+  char* token = strtok(buf, ",");
+  int i = 0;
+  while (token && i < 6) {
+    cfg.gearRatios[i++] = atof(token);
+    token = strtok(nullptr, ",");
+  }
+}
+
+// // callback when data is sent
+// void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+// {
+//   // Serial.print("\r\nLast Packet Send Status:\t");
+//   // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+// }
 
 
 
@@ -454,7 +582,7 @@ void IRAM_ATTR on_t3_cut()
 void coilInterrupt(int ch)
 {
   bool bPin = digitalRead(MEASURE_PINS[ch]); // Measurement Pin
-  unsigned long lTime = micros();                                                 // TODO: Can this be made more efficient?
+  unsigned long lTime = micros();
 
   // When ECU pulls coil to ground (rising edge on logic signal)
   if (bPin && !lastMeasureState[ch])
@@ -512,9 +640,9 @@ void setup()
   pinMode(RED_PIN, OUTPUT);
   digitalWrite(RED_PIN, HIGH); // Off default
 
-  // Hall, Piezo, GPIO
-  int adcPins[5] = {HALL_PINS[0], HALL_PINS[1], PIEZO_PIN, GPIO_PIN, WHEEL_PIN};
-  for (int i = 0; i < 5; i++) {
+  // Hall, Piezo
+  int adcPins[4] = {HALL_PINS[0], HALL_PINS[1], PIEZO_PIN, WHEEL_PIN};
+  for (int i = 0; i < 4; i++) {
     pinMode(adcPins[i], INPUT);
   }
 
@@ -523,7 +651,7 @@ void setup()
     pinMode(IGBT_PINS[i], OUTPUT);
     digitalWrite(IGBT_PINS[i], HIGH); // Open IGBT default
 
-    pinMode(MEASURE_PINS[i], INPUT_PULLUP);                 // TODO: Does this need to be pullup?
+    pinMode(MEASURE_PINS[i], INPUT);
   }
 
   void (*on_cut_funcs[4])() = {on_t0_cut, on_t1_cut, on_t2_cut, on_t3_cut};
@@ -534,7 +662,7 @@ void setup()
 
   // Attach interrupts to MEASURE_PINS[i]
   void (*pcFuncs[4])() = {onPC0, onPC1, onPC2, onPC3};
-  for (int i = 0; i < 3; i++) {                         // THIS SHOULD BE 4 normally for all 4 channels, using CH4 for wheel speed right now
+  for (int i = 0; i < 4; i++) {
     attachInterrupt(digitalPinToInterrupt(MEASURE_PINS[i]), pcFuncs[i], CHANGE);
   }
 
@@ -545,8 +673,19 @@ void setup()
   conf.readConfig();
   transferWebconfToStruct("");
 
-  WiFi.mode(WIFI_AP);
-  WiFi.setTxPower(WIFI_POWER_7dBm);
+  WiFi.mode(WIFI_AP_STA); // WIFI_AP
+
+  esp_now_init(); // Init ESP-NOW
+  //esp_now_register_send_cb(OnDataSent); // Hopefully the send callback is not required
+
+  // Register peer
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+
+  esp_now_add_peer(&peerInfo); // Add peer
+
+  WiFi.setTxPower(WIFI_POWER_8_5dBm); // 7 also works (other options: 2, 5, 7, 8.5, 11, 13, 15)
   WiFi.softAP(conf.getApName(), conf.values[0].c_str());
 
   uint8_t baseMac[6];
@@ -584,7 +723,7 @@ void loop()
       const int inputs[] = {PIEZO_PIN, HALL_PINS[0], HALL_PINS[1], PIEZO_PIN};
 
       pressureValue = analogRead(inputs[cfg.pressureInput]);
-      if (cfg.pressureInput == 3)
+      if (cfg.pressureInput == 0)
         pressureValue = 4095 - pressureValue;
       
       buttonPressed = cfg.buttonInput ? !digitalRead(inputs[cfg.buttonInput]) : false;
@@ -597,29 +736,38 @@ void loop()
           case LAUNCH: limiterState = OFF; break;
 
           case OFF:
-            // limiterState = PIT;
-            if (lastSpeed > cfg.limiterMaxSpeed && cfg.wheelSensor)
-              limiterState = PIT;
-            else
+            if (lastWheelSpeed < cfg.limiterMaxSpeed && cfg.wheelSensor)
               limiterState = LAUNCH;
+            else
+              limiterState = PIT;
             break;
         }
       }
 
+      if (cfg.limiterAlways)
+        limiterState = PIT;
+
       lastButtonState = buttonPressed;
 
       if (lastRPMdelta[0] > 0)
-        lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];         // TODO: Change cfg.wastedSpark back to boolean, create global variable that stores 360 or 720 for onPCx functions but keeps this simple
+        lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];
         //lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
 
       lastRead = currTime;
     }
 
-    // Read wheel speed every 200 ms (5 Hz)
-    if (cfg.wheelSensor && (currTime - lastSpeedRead) >= 200000)
+    // Read wheel speed every 500 ms (2 Hz)
+    if (cfg.wheelSensor && (currTime - lastSpeedRead) >= 500000)
     {
-      lastSpeed = (int)(speedPulses * 4.2857f);
+      lastWheelRPM = (int)(speedPulses * (120 / (float)cfg.sensorPulses));
       speedPulses = 0;
+
+      lastWheelSpeed = (lastWheelRPM * cfg.speedScale) / 60000.f;
+
+      measuredRatio = (lastWheelRPM > 0) ? (lastRPM / (float)lastWheelRPM) : 999.9f; // Calculate gear ratio from engine RPM and rear wheel RPM
+      filteredRatio = (alpha * measuredRatio) + ((1 - alpha) * filteredRatio); // Exponential moving average filtering
+
+      currentGear = detectGear(measuredRatio);
 
       lastSpeedRead = currTime;
     }
@@ -633,7 +781,7 @@ void loop()
       switch (limiterState)
       {
         case LAUNCH:
-          if (lastSpeed >= cfg.limiterMaxSpeed * cfg.speedScale)
+          if (lastWheelSpeed > cfg.limiterMaxSpeed)
             limiterState = OFF;
 
           if (cfg.launchRPM && lastRPM > cfg.launchRPM && !shiftingTrig)
@@ -679,7 +827,7 @@ void loop()
     if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*1000)
     {
       shiftingTrig = true;
-      currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);                 // TODO: Make this logarithmic instead of linear (more change at low rpm, less change at high rpm)
+      currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);
       currHoldTime = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.holdTimeLow, cfg.holdTimeHigh);
 
       currRestore = (int)(currRetard / cfg.restore) + 1;
