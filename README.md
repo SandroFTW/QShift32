@@ -19,49 +19,36 @@ R1 PCB 3D model:
 
 ## New possibilities
 - Either ignition timing retard or full spark cut to allow clutchless shifting
-- Ignition timing retard will smoothly go back to normal operation after shift is done
-- Smooth control over engine power transitions -> extremely smooth shifts
+- Ignition timing retard will smoothly go back to normal operation after shift is done (no jerky movement, less gearbox wear)
+- Smooth control over engine power transitions -> extremely smooth shifts (upshifts while leaning and accelerating possible)
 - RPM measurement even during power cut (not during full spark cut, only ignition retard)
-- During upshift period fuel gets ignited in the exhaust instead of remaining unburnt (-> pops and flames)
-- Pit limiter and launch control (RPM limiter) with spark cut and ignition retard (-> pops and flames)
-- Precise dwell time and time per revolution measurement for each channel (10 µs precision)
-- Expandable to support shift light, handlebar buttons, gear indicator etc. in the future
+- During upshift period fuel gets ignited in the exhaust instead of remaining unburnt (controllable pops and flame strength)
+- Pit limiter and launch control (RPM limiter) with spark cut and ignition retard (soft limiter or hard limiter with pops and flames)
+- Precise dwell time and time per revolution measurement for each channel (1 µs precision)
+- Expandable to support handlebar buttons, gear indicator, shift light (not implemented yet), etc.
 
 ## Easy configuration
 Use any smartphone to connect to the WiFi Access Point opened by QShift32.
 IP Adress 192.168.4.1 shows the configuration options.
-192.168.4.1/debug.html shows a few internal debug values that can help finding possible errors (mostly needed for development)
+192.168.4.1/debug.html shows a few internal debug values that can help setting up the config and finding possible errors (mostly needed for development).
 
 <img src='images/config_ui.jpg' width='250'>
 
-## Development progress
-### 21.03.2025
-- All 4 channels are working now (optimized timer allocation by using system timer)
-- 1500 km of successful road testing done
-- still working on perfecting the different configuration options
-  to reduce complexity and improve shift quality
-- experimented with really low and really high retard values and smoothness factors:
-  low retard -> very smooth, nice shift sound that's not too loud
-  high retard -> a bit less smooth, very fast shifts, loud explosions at medium throttle and high rpm
-- no electronic failures
-### 30.01.2025
-- 300 km of successful road testing done
-- no electronic failures
-### 04.01.2025
-- New option to do a full ignition cut instead of retarding timing
-- Still smoothly brings back the engine power after shifting
+## Precise control over ignition coils
+The **bottom graph** shows an unmodified reference ignition coil signal as produced by the engine ECU.
 
-  <img src='images/cut_retard_smooth_waveform.png' width='350'>
+The **top graph** shows the modified ignition pulse, controlled by QShift32.
+It prevents ignition pulses for a set time and then slowly reintroduces engine power output by ramping down the ignition retard angle.
 
-### 28.12.2024
-- R1 pcb assembled
-- first successful tests of retarding ignition pulses (only on the bench)
+<img src='images/cut_retard_smooth_waveform.png' width='350'>
 
-## Next steps
-- Implement rear wheel speed sensor reading (Gear indicator and automatic Launch mode exit)
-- Upload Gerber files and assembly info for PCB R2
+## Next steps (high to low priority)
+- Upload more pictures and write easy-to-follow build instructions and documentation
+- Improve code structure, efficiency and write more code documentation
+- Try to reduce the ammount of configuration options for simlicity
+- Find a way to reliably measure variable reluctance wheel speed sensors (only 0-5V hall type working right now)
 - Design a case that holds the PCB and connectors (ideally somewhat water splash proof)
-- Find a way of controlling multiple channels simultaneously with a single timer (low priority)
+- Find a way of controlling multiple channels simultaneously with a single timer (very low priority)
 
 The pulse measurement and IGBT switching schematic and some parts of the code were inspired by the "DIY Quickshifter" series by Gil Vargas on YouTube.
 He explains all the steps in great detail.
