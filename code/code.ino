@@ -46,12 +46,13 @@ volatile int currRetard                  = 0;     // Used for gradual ignition r
 volatile int currRestore                 = 0;     // Calculated deg/ignition pulse recovery speed
 
 unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
-unsigned long lastRead            = 0;     // When was the last ADC sensor reading (50 Hz)
+unsigned long lastRead            = 0;     // When was the last ADC sensor reading (20 Hz)
 unsigned long lastCut             = 0;     // When was the last ignition cut/retard begin
 unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed measurement (2 Hz)
 
 int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
 int lastRPM                       = 0;
+int lastRPMRate                   = 0;     // RPM change rate (1/min / s)
 int lastWheelRPM                  = 0;     // Measured rear wheel speed (1/min)
 float lastWheelSpeed              = 0;     // Calculated rear wheel speed (km/h)
 int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
@@ -59,6 +60,7 @@ int limiterState                  = 0;     // Current state of RPM limiter mode
 bool buttonPressed                = false; // Handlebar button state
 bool lastButtonState              = false; // Last button state for edge detection
 bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
+bool decelRetarding               = false; // RPM is dropping fast and ignition retarded
 
 // Gear indicator
 //float gearRatios[6] = {2.5, 1.55, 1.15, 0.923, 0, 0};             // Grom gear ratios (Primary: * 3.35) = {8.375, 5.2, 3,85, 3.10, 999, 999}
@@ -76,10 +78,10 @@ hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
 const int IGBT_PINS[4]    = {2, 3, 4, 1};
-const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
-//const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom)
+//const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
+const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
 
-const int WHEEL_PIN = 15; // 12 on my grom, 15 on my xj6, 14 in new PCB revision
+const int WHEEL_PIN = 14; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
 const int PIEZO_PIN = 13;
 const int GREEN_PIN = 5;
 const int RED_PIN   = 6;
@@ -304,7 +306,7 @@ String params = "["
   "'label':'Gearbox Gear Count',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':6,"
-  "'default':'6'"
+  "'default':'4'"
   "},"
   "{"
   "'name':'gearRatios',"
@@ -316,13 +318,38 @@ String params = "["
   "'name':'espNow',"
   "'label':'Enable ESP-NOW Sending',"
   "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'1'"
+  "'default':'0'"
   "},"
   "{"
   "'name':'macAddr',"
   "'label':'Receiver MAC Adress',"
   "'type':"+String(INPUTTEXT)+","
-  "'default':'40:91:51:55:C5:9B'"
+  "'default':'FF:FF:FF:FF:FF:FF'"
+  "},"
+  "{"
+  "'name':'category5',"
+  "'label':'Dumb Stuff (Beta)',"
+  "'type':"+String(CATEGORY)+""
+  "},"
+  "{"
+  "'name':'enableDecelRetard',"
+  "'label':'Enable Decel Retard',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'0'"
+  "},"
+  "{"
+  "'name':'decelThreshold',"
+  "'label':'Decel Rate Threshold',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':10000,"
+  "'default':'2500'"
+  "},"
+  "{"
+  "'name':'decelRetard',"
+  "'label':'Decel Retard',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':100,"
+  "'default':'20'"
   "}"
   "]";
 
@@ -370,6 +397,10 @@ struct cfgOptions
   float gearRatios[6];
   bool espNow;
   String macAddr;
+
+  bool enableDecelRetard;
+  int decelThreshold;
+  int decelRetard;
 } cfg;
 
 void transferWebconfToStruct(String results)
@@ -429,6 +460,10 @@ void transferWebconfToStruct(String results)
   cfg.macAddr = conf.getString("macAddr").c_str();
 
   macStringToBytes(cfg.macAddr.c_str(), broadcastAddress);
+
+  cfg.enableDecelRetard = conf.getBool("enableDecelRetard");
+  cfg.decelThreshold = conf.getInt("decelThreshold");
+  cfg.decelRetard = conf.getInt("decelRetard");
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -472,7 +507,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       const [val1, val2, val3, val4, val5, val6, val7, val8, val9, val10, val11] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
-      valEl3.innerText = `Last Dwell (us) [0]: ${val3}`;
+      valEl3.innerText = `RPM change: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
@@ -502,7 +537,7 @@ void push_debug(void *parameters)
     String cGear = currentGear ? String(currentGear) : "N";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
-    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastDwellTime[0]) + ","
+    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMRate) + ","
                               + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
                               + cGear +                             "," + String(measuredRatio) + "," + String(lastWheelSpeed) + ","
                               + lMode +                             "," + String(macAddr);
@@ -717,8 +752,8 @@ void loop()
   // Run every 1 ms (1 kHz)
   if ((currTime - lastCycle) >= 1000)
   {
-    // Read ADC sensors every 20 ms (50 Hz)
-    if ((currTime - lastRead) >= 20000)
+    // Read ADC sensors every 50 ms (20 Hz)
+    if ((currTime - lastRead) >= 50000)
     {
       const int inputs[] = {PIEZO_PIN, HALL_PINS[0], HALL_PINS[1], PIEZO_PIN};
 
@@ -745,13 +780,18 @@ void loop()
       }
 
       if (cfg.limiterAlways)
-        limiterState = PIT;
+        limiterState = PIT;                                    // TODO: Possible conflict with decelRetarding
 
       lastButtonState = buttonPressed;
 
+      int backupRPM = lastRPM;
       if (lastRPMdelta[0] > 0)
+      {
         lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];
         //lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
+        //lastRPMRate = (lastRPM - backupRPM);
+        lastRPMRate = 0.1 * 20*(lastRPM - backupRPM) + 0.9 * lastRPMRate;
+      }
 
       lastRead = currTime;
     }
@@ -793,6 +833,7 @@ void loop()
             currHoldTime = min((int)((lastRPM - cfg.launchRPM) * cfg.limiterCut / 100.f), 200); // rpmError * gain and limit to 200 ms
             currRestore = (int)(cfg.limiterRetard / cfg.limiterDiv);
             cfg.fullCut = cfg.limiterFullCut;
+            lastCut = currTime;
           }
           break;
 
@@ -806,25 +847,48 @@ void loop()
             currHoldTime = min((int)((lastRPM - cfg.limiterRPM) * cfg.limiterCut / 100.f), 200); // rpmError * gain and limit to 200 ms
             currRestore = (int)(cfg.limiterRetard / cfg.limiterDiv);
             cfg.fullCut = cfg.limiterFullCut;
+            lastCut = currTime;
           }
           break;
 
         case OFF:
-          if (limitingRPM)
+          if (limitingRPM && !decelRetarding)
           {
             limitingRPM = false;
             shiftingTrig = false;
-            //waitHyst = false;
             cfg.fullCut = conf.getBool("fullCut");
           }
           break;
       }
     }
 
+    if (cfg.enableDecelRetard) // If it works like this, this check can be moved back to the long if condition
+    {
+      if (lastRPM > cfg.minRPM && (-1 * lastRPMRate) > cfg.decelThreshold && limiterState == OFF && !limitingRPM)
+      {
+          decelRetarding = true;
+          shiftingTrig = true;
+          waitHyst = true;
+          currHoldTime = 100;
+          currRetard = cfg.decelRetard;
+          currRestore = 999;
+          cfg.fullCut = false;
+      }
+      else
+      {
+        if (decelRetarding)
+        {
+          decelRetarding = false;
+          shiftingTrig = false;
+          cfg.fullCut = conf.getBool("fullCut");
+        }
+      }
+    }
+
     if (lastRPM < cfg.minRPM)
       waitHyst = true;
 
-    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*1000)
+    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && !decelRetarding && (currTime - lastCut) >= cfg.deadTime*1000)
     {
       shiftingTrig = true;
       currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);
@@ -839,7 +903,7 @@ void loop()
       lastCut = currTime;
     }
 
-    if (shiftingTrig && !limitingRPM && (currTime - lastCut) >= currHoldTime*1000)
+    if (shiftingTrig && (currTime - lastCut) >= currHoldTime*1000)
     {
       shiftingTrig = false;
       digitalWrite(GREEN_PIN, HIGH); // Off
