@@ -14,22 +14,10 @@
 #include <AsyncWebConfig.h>
 #include <esp_wifi.h>
 #include <AsyncTCP.h>
-#include <esp_now.h>
 #include <SPIFFS.h>
 #include <WiFi.h>
 
 #include <Arduino.h>
-
-uint8_t broadcastAddress[6];
-
-typedef struct sendData {
-  int currGear;
-  int currMode;
-};
-
-sendData sen;
-
-esp_now_peer_info_t peerInfo;
 
 WebSocketsServer webSocket = WebSocketsServer(81);
 
@@ -52,7 +40,6 @@ unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed
 
 int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
 int lastRPM                       = 0;
-int lastRPMRate                   = 0;     // RPM change rate (1/min / s)
 int lastWheelRPM                  = 0;     // Measured rear wheel speed (1/min)
 float lastWheelSpeed              = 0;     // Calculated rear wheel speed (km/h)
 int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
@@ -60,17 +47,6 @@ int limiterState                  = 0;     // Current state of RPM limiter mode
 bool buttonPressed                = false; // Handlebar button state
 bool lastButtonState              = false; // Last button state for edge detection
 bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
-bool decelRetarding               = false; // RPM is dropping fast and ignition retarded
-
-// Gear indicator
-//float gearRatios[6] = {2.5, 1.55, 1.15, 0.923, 0, 0};             // Grom gear ratios (Primary: * 3.35) = {8.375, 5.2, 3,85, 3.10, 999, 999}
-//float gearRatios[6] = {2.846, 1.947, 1.556, 1.333, 1.190, 1.083}; // XJ6 gear ratios (Primary: * 1.955) = {5.564, 3.806, 3.042, 2.606, 2.326, 2.117}
-float measuredRatio = 0.f;
-float filteredRatio = 0.f;
-float alpha         = 0.f;
-int currentGear     = 0; // 1-6, 0 = N
-
-char macAddr[20];
 
 // Timer instances
 hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
@@ -91,12 +67,6 @@ enum lim {
   LAUNCH = 1,
   PIT = 2
 };
-
-void macStringToBytes(const char *macStr, uint8_t *macBytes)
-{
-    for (int i = 0; i < 6; i++)
-      macBytes[i] = strtoul(macStr + (i * 3), NULL, 16);
-}
 
 String params = "["
   "{"
@@ -295,61 +265,6 @@ String params = "["
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':1000,"
   "'default':'70'"
-  "},"
-  "{"
-  "'name':'category4',"
-  "'label':'Gear Indicator',"
-  "'type':"+String(CATEGORY)+""
-  "},"
-  "{"
-  "'name':'gearCount',"
-  "'label':'Gearbox Gear Count',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':6,"
-  "'default':'4'"
-  "},"
-  "{"
-  "'name':'gearRatios',"
-  "'label':'Gear Ratios (2.00, 1.85, ...)',"
-  "'type':"+String(INPUTTEXT)+","
-  "'default':'8.375, 5.2, 3,85, 3.10, 999, 999'"     // Grom 3.35 (Primary ratio) * Gearbox Ratio (2.5, 1.55, 1.15, 0.923)
-  "},"
-  "{"
-  "'name':'espNow',"
-  "'label':'Enable ESP-NOW Sending',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'0'"
-  "},"
-  "{"
-  "'name':'macAddr',"
-  "'label':'Receiver MAC Adress',"
-  "'type':"+String(INPUTTEXT)+","
-  "'default':'FF:FF:FF:FF:FF:FF'"
-  "},"
-  "{"
-  "'name':'category5',"
-  "'label':'Dumb Stuff (Beta)',"
-  "'type':"+String(CATEGORY)+""
-  "},"
-  "{"
-  "'name':'enableDecelRetard',"
-  "'label':'Enable Decel Retard',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'0'"
-  "},"
-  "{"
-  "'name':'decelThreshold',"
-  "'label':'Decel Rate Threshold',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':10000,"
-  "'default':'2500'"
-  "},"
-  "{"
-  "'name':'decelRetard',"
-  "'label':'Decel Retard',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':100,"
-  "'default':'20'"
   "}"
   "]";
 
@@ -392,15 +307,6 @@ struct cfgOptions
   bool wheelSensor;
   int speedScale;
   int sensorPulses;
-
-  int gearCount;
-  float gearRatios[6];
-  bool espNow;
-  String macAddr;
-
-  bool enableDecelRetard;
-  int decelThreshold;
-  int decelRetard;
 } cfg;
 
 void transferWebconfToStruct(String results)
@@ -451,19 +357,6 @@ void transferWebconfToStruct(String results)
   cfg.wheelSensor = conf.getInt("wheelSensor");
   cfg.speedScale = conf.getInt("speedScale");
   cfg.sensorPulses = conf.getInt("sensorPulses");
-
-  cfg.gearCount = conf.getInt("gearCount");
-
-  parseGearRatios(conf.getValue("gearRatios"));
-
-  cfg.espNow = conf.getBool("espNow");
-  cfg.macAddr = conf.getString("macAddr").c_str();
-
-  macStringToBytes(cfg.macAddr.c_str(), broadcastAddress);
-
-  cfg.enableDecelRetard = conf.getBool("enableDecelRetard");
-  cfg.decelThreshold = conf.getInt("decelThreshold");
-  cfg.decelRetard = conf.getInt("decelRetard");
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -485,10 +378,6 @@ const char debug_html[] PROGMEM = R"rawliteral(
   <br>
   <p id="val7">...</p>
   <p id="val8">...</p>
-  <p id="val9">...</p>
-  <p id="val10">...</p>
-  <br>
-  <p id="val11">...</p>
   <script>
     const valEl1 = document.getElementById('val1');
     const valEl2 = document.getElementById('val2');
@@ -498,24 +387,18 @@ const char debug_html[] PROGMEM = R"rawliteral(
     const valEl6 = document.getElementById('val6');
     const valEl7 = document.getElementById('val7');
     const valEl8 = document.getElementById('val8');
-    const valEl9 = document.getElementById('val9');
-    const valEl10 = document.getElementById('val10');
-    const valEl11 = document.getElementById('val11');
     const ws = new WebSocket(`ws://${location.hostname}:81/`);
 
     ws.onmessage = function(event) {
-      const [val1, val2, val3, val4, val5, val6, val7, val8, val9, val10, val11] = event.data.split(",");
+      const [val1, val2, val3, val4, val5, val6, val7, val8] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
       valEl3.innerText = `RPM change: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
-      valEl7.innerText = `currentGear: ${val7}`;
-      valEl8.innerText = `Gear Ratio: ${val8}`;
-      valEl9.innerText = `Speed (km/h): ${val9}`;
-      valEl10.innerText = `Limiter Mode: ${val10}`;
-      valEl11.innerText = `MAC adress: ${val11}`;
+      valEl7.innerText = `Speed (km/h): ${val7}`;
+      valEl8.innerText = `Limiter Mode: ${val8}`;
     };
   </script>
 </body>
@@ -534,20 +417,11 @@ void push_debug(void *parameters)
   for (;;)
   {
     //String sTrig = shiftingTrig ? "true" : "false";
-    String cGear = currentGear ? String(currentGear) : "N";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
     String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMRate) + ","
-                              + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
-                              + cGear +                             "," + String(measuredRatio) + "," + String(lastWheelSpeed) + ","
-                              + lMode +                             "," + String(macAddr);
-
-    if (cfg.espNow)
-    {
-      sen.currGear = currentGear;
-      sen.currMode = limiterState;
-      esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&sen, sizeof(sen)); // Send message via ESP-NOW
-    }
+                           + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
+                           + String(lastWheelSpeed) +            "," + lMode;
 
     webSocket.loop();
     webSocket.broadcastTXT(broadcastString);
@@ -555,43 +429,6 @@ void push_debug(void *parameters)
     delay(200);
   }
 }
-
-// Return the best matching gear for the given gear ratio
-int detectGear(float ratio)
-{
-    if (ratio > 20.0 || ratio < 0.3) return 0; // Assume neutral if ratio is excessively high (rear wheel stationary) or low (clutch pulled at high speed)
-    
-    int bestGear = 1;
-    float minDiff = abs(ratio - cfg.gearRatios[0]);
-    
-    for (int i = 1; i < cfg.gearCount; i++) {
-        float diff = abs(ratio - cfg.gearRatios[i]);
-        if (diff < minDiff) {
-            minDiff = diff;
-            bestGear = i + 1;
-        }
-    }
-    return bestGear;
-}
-
-void parseGearRatios(const String& input)
-{
-  char buf[64];
-  input.toCharArray(buf, sizeof(buf));
-  char* token = strtok(buf, ",");
-  int i = 0;
-  while (token && i < 6) {
-    cfg.gearRatios[i++] = atof(token);
-    token = strtok(nullptr, ",");
-  }
-}
-
-// // callback when data is sent
-// void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
-// {
-//   // Serial.print("\r\nLast Packet Send Status:\t");
-//   // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
-// }
 
 
 
@@ -708,26 +545,9 @@ void setup()
   conf.readConfig();
   transferWebconfToStruct("");
 
-  WiFi.mode(WIFI_AP_STA); // WIFI_AP
-
-  esp_now_init(); // Init ESP-NOW
-  //esp_now_register_send_cb(OnDataSent); // Hopefully the send callback is not required
-
-  // Register peer
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;  
-  peerInfo.encrypt = false;
-
-  esp_now_add_peer(&peerInfo); // Add peer
-
+  WiFi.mode(WIFI_AP);
   WiFi.setTxPower(WIFI_POWER_8_5dBm); // 7 also works (other options: 2, 5, 7, 8.5, 11, 13, 15)
   WiFi.softAP(conf.getApName(), conf.values[0].c_str());
-
-  uint8_t baseMac[6];
-  esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
-  if (ret == ESP_OK) {
-    sprintf(macAddr, "%02x:%02x:%02x:%02x:%02x:%02x\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
-  }
 
   server.on("/", handleRoot);
 
@@ -784,13 +604,10 @@ void loop()
 
       lastButtonState = buttonPressed;
 
-      int backupRPM = lastRPM;
       if (lastRPMdelta[0] > 0)
       {
         lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];
         //lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
-        //lastRPMRate = (lastRPM - backupRPM);
-        lastRPMRate = 0.1 * 20*(lastRPM - backupRPM) + 0.9 * lastRPMRate;
       }
 
       lastRead = currTime;
@@ -803,11 +620,6 @@ void loop()
       speedPulses = 0;
 
       lastWheelSpeed = (lastWheelRPM * cfg.speedScale) / 60000.f;
-
-      measuredRatio = (lastWheelRPM > 0) ? (lastRPM / (float)lastWheelRPM) : 999.9f; // Calculate gear ratio from engine RPM and rear wheel RPM
-      filteredRatio = (alpha * measuredRatio) + ((1 - alpha) * filteredRatio); // Exponential moving average filtering
-
-      currentGear = detectGear(measuredRatio);
 
       lastSpeedRead = currTime;
     }
@@ -852,7 +664,7 @@ void loop()
           break;
 
         case OFF:
-          if (limitingRPM && !decelRetarding)
+          if (limitingRPM)
           {
             limitingRPM = false;
             shiftingTrig = false;
@@ -862,33 +674,10 @@ void loop()
       }
     }
 
-    if (cfg.enableDecelRetard) // If it works like this, this check can be moved back to the long if condition
-    {
-      if (lastRPM > cfg.minRPM && (-1 * lastRPMRate) > cfg.decelThreshold && limiterState == OFF && !limitingRPM)
-      {
-          decelRetarding = true;
-          shiftingTrig = true;
-          waitHyst = true;
-          currHoldTime = 100;
-          currRetard = cfg.decelRetard;
-          currRestore = 999;
-          cfg.fullCut = false;
-      }
-      else
-      {
-        if (decelRetarding)
-        {
-          decelRetarding = false;
-          shiftingTrig = false;
-          cfg.fullCut = conf.getBool("fullCut");
-        }
-      }
-    }
-
     if (lastRPM < cfg.minRPM)
       waitHyst = true;
 
-    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && !decelRetarding && (currTime - lastCut) >= cfg.deadTime*1000)
+    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*1000)
     {
       shiftingTrig = true;
       currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);
