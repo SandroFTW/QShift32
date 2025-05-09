@@ -52,7 +52,6 @@ unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed
 
 int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
 int lastRPM                       = 0;
-int lastRPMRate                   = 0;     // RPM change rate (1/min / s)
 int lastWheelRPM                  = 0;     // Measured rear wheel speed (1/min)
 float lastWheelSpeed              = 0;     // Calculated rear wheel speed (km/h)
 int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
@@ -60,7 +59,6 @@ int limiterState                  = 0;     // Current state of RPM limiter mode
 bool buttonPressed                = false; // Handlebar button state
 bool lastButtonState              = false; // Last button state for edge detection
 bool waitHyst                     = true;  // Needs to be low before another upshift is allowed
-bool decelRetarding               = false; // RPM is dropping fast and ignition retarded
 
 // Gear indicator
 //float gearRatios[6] = {2.5, 1.55, 1.15, 0.923, 0, 0};             // Grom gear ratios (Primary: * 3.35) = {8.375, 5.2, 3,85, 3.10, 999, 999}
@@ -277,6 +275,12 @@ String params = "["
   "'default':'0'"
   "},"
   "{"
+  "'name':'invertPressure',"
+  "'label':'Invert Pressure Sensor',"
+  "'type':"+String(INPUTCHECKBOX)+","
+  "'default':'0'"
+  "},"
+  "{"
   "'name':'wheelSensor',"
   "'label':'Wheel Speed Sensor',"
   "'type':"+String(INPUTCHECKBOX)+","
@@ -312,7 +316,7 @@ String params = "["
   "'name':'gearRatios',"
   "'label':'Gear Ratios (2.00, 1.85, ...)',"
   "'type':"+String(INPUTTEXT)+","
-  "'default':'8.375, 5.2, 3,85, 3.10, 999, 999'"     // Grom 3.35 (Primary ratio) * Gearbox Ratio (2.5, 1.55, 1.15, 0.923)
+  "'default':'8.375, 5.2, 3.85, 3.10, 999, 999'"     // Grom 3.35 (Primary ratio) * Gearbox Ratio (2.5, 1.55, 1.15, 0.923)
   "},"
   "{"
   "'name':'espNow',"
@@ -324,32 +328,7 @@ String params = "["
   "'name':'macAddr',"
   "'label':'Receiver MAC Adress',"
   "'type':"+String(INPUTTEXT)+","
-  "'default':'FF:FF:FF:FF:FF:FF'"
-  "},"
-  "{"
-  "'name':'category5',"
-  "'label':'Dumb Stuff (Beta)',"
-  "'type':"+String(CATEGORY)+""
-  "},"
-  "{"
-  "'name':'enableDecelRetard',"
-  "'label':'Enable Decel Retard',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'0'"
-  "},"
-  "{"
-  "'name':'decelThreshold',"
-  "'label':'Decel Rate Threshold',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':10000,"
-  "'default':'2500'"
-  "},"
-  "{"
-  "'name':'decelRetard',"
-  "'label':'Decel Retard',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':100,"
-  "'default':'20'"
+  "'default':'FF:FF:FF:FF:FF:FF'" // 40:91:51:55:C5:9B
   "}"
   "]";
 
@@ -389,6 +368,7 @@ struct cfgOptions
 
   int pressureInput;
   int buttonInput;
+  bool invertPressure;
   bool wheelSensor;
   int speedScale;
   int sensorPulses;
@@ -397,10 +377,6 @@ struct cfgOptions
   float gearRatios[6];
   bool espNow;
   String macAddr;
-
-  bool enableDecelRetard;
-  int decelThreshold;
-  int decelRetard;
 } cfg;
 
 void transferWebconfToStruct(String results)
@@ -448,7 +424,8 @@ void transferWebconfToStruct(String results)
   else if (butt == "2")
     cfg.buttonInput = 2; // ADC 2
 
-  cfg.wheelSensor = conf.getInt("wheelSensor");
+  cfg.invertPressure = conf.getBool("invertPressure");
+  cfg.wheelSensor = conf.getInt("wheelSensor");                     // TODO: Shouldn't this be bool?
   cfg.speedScale = conf.getInt("speedScale");
   cfg.sensorPulses = conf.getInt("sensorPulses");
 
@@ -460,10 +437,6 @@ void transferWebconfToStruct(String results)
   cfg.macAddr = conf.getString("macAddr").c_str();
 
   macStringToBytes(cfg.macAddr.c_str(), broadcastAddress);
-
-  cfg.enableDecelRetard = conf.getBool("enableDecelRetard");
-  cfg.decelThreshold = conf.getInt("decelThreshold");
-  cfg.decelRetard = conf.getInt("decelRetard");
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -507,7 +480,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       const [val1, val2, val3, val4, val5, val6, val7, val8, val9, val10, val11] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
-      valEl3.innerText = `RPM change: ${val3}`;
+      valEl3.innerText = `lastDwell[0]: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
@@ -537,7 +510,7 @@ void push_debug(void *parameters)
     String cGear = currentGear ? String(currentGear) : "N";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
-    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMRate) + ","
+    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastDwellTime[0]) + ","
                               + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
                               + cGear +                             "," + String(measuredRatio) + "," + String(lastWheelSpeed) + ","
                               + lMode +                             "," + String(macAddr);
@@ -758,7 +731,7 @@ void loop()
       const int inputs[] = {PIEZO_PIN, HALL_PINS[0], HALL_PINS[1], PIEZO_PIN};
 
       pressureValue = analogRead(inputs[cfg.pressureInput]);
-      if (cfg.pressureInput == 0)
+      if (cfg.invertPressure)
         pressureValue = 4095 - pressureValue;
       
       buttonPressed = cfg.buttonInput ? !digitalRead(inputs[cfg.buttonInput]) : false;
@@ -784,13 +757,10 @@ void loop()
 
       lastButtonState = buttonPressed;
 
-      int backupRPM = lastRPM;
       if (lastRPMdelta[0] > 0)
       {
         lastRPM = ((cfg.wastedSpark > 700) ? 120000000UL : 60000000UL) / lastRPMdelta[0];
         //lastRPM = (cfg.wastedSpark ? 6000000UL : 12000000UL) / lastRPMdelta[0];
-        //lastRPMRate = (lastRPM - backupRPM);
-        lastRPMRate = 0.1 * 20*(lastRPM - backupRPM) + 0.9 * lastRPMRate;
       }
 
       lastRead = currTime;
@@ -852,7 +822,7 @@ void loop()
           break;
 
         case OFF:
-          if (limitingRPM && !decelRetarding)
+          if (limitingRPM)
           {
             limitingRPM = false;
             shiftingTrig = false;
@@ -862,33 +832,10 @@ void loop()
       }
     }
 
-    if (cfg.enableDecelRetard) // If it works like this, this check can be moved back to the long if condition
-    {
-      if (lastRPM > cfg.minRPM && (-1 * lastRPMRate) > cfg.decelThreshold && limiterState == OFF && !limitingRPM)
-      {
-          decelRetarding = true;
-          shiftingTrig = true;
-          waitHyst = true;
-          currHoldTime = 100;
-          currRetard = cfg.decelRetard;
-          currRestore = 999;
-          cfg.fullCut = false;
-      }
-      else
-      {
-        if (decelRetarding)
-        {
-          decelRetarding = false;
-          shiftingTrig = false;
-          cfg.fullCut = conf.getBool("fullCut");
-        }
-      }
-    }
-
     if (lastRPM < cfg.minRPM)
       waitHyst = true;
 
-    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && !decelRetarding && (currTime - lastCut) >= cfg.deadTime*1000)
+    if (pressureValue > cfg.cutSens && lastRPM >= cfg.minRPM && !waitHyst && !shiftingTrig && !limitingRPM && (currTime - lastCut) >= cfg.deadTime*1000)
     {
       shiftingTrig = true;
       currRetard = map(lastRPM, cfg.minRPM, cfg.maxRPM, cfg.retardLow, cfg.retardHigh);
