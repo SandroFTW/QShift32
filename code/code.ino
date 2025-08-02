@@ -151,6 +151,13 @@ String params = "["
   "'default':'500'"
   "},"
   "{"
+  "'name':'staggeredCut',"
+  "'label':'Staggered Cut Cycles (0-8)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':0,'max':8,"
+  "'default':'4'"
+  "},"
+  "{"
   "'name':'fullCut',"
   "'label':'Full Ignition Cut',"
   "'type':"+String(INPUTCHECKBOX)+","
@@ -289,6 +296,7 @@ struct cfgOptions
   int deadTime;
   int cutSens;
   int cutHyst;
+  int staggeredCut;
 
   bool fullCut;
   float wastedSpark;
@@ -324,6 +332,7 @@ void transferWebconfToStruct(String results)
   cfg.deadTime = conf.getInt("deadTime");
   cfg.cutSens = conf.getInt("cutSens");
   cfg.cutHyst = conf.getInt("cutHyst");
+  cfg.staggeredCut = conf.getInt("staggeredCut");
 
   cfg.fullCut = conf.getBool("fullCut");
   cfg.wastedSpark = conf.getBool("wastedSpark") ? 360.f : 720.f;
@@ -393,7 +402,7 @@ const char debug_html[] PROGMEM = R"rawliteral(
       const [val1, val2, val3, val4, val5, val6, val7, val8] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
-      valEl3.innerText = `RPM change: ${val3}`;
+      valEl3.innerText = `lastDwell[0]: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
@@ -419,7 +428,7 @@ void push_debug(void *parameters)
     //String sTrig = shiftingTrig ? "true" : "false";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
-    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMRate) + ","
+    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastDwellTime[0]) + ","
                            + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
                            + String(lastWheelSpeed) +            "," + lMode;
 
@@ -461,8 +470,10 @@ void coilInterrupt(int ch)
   {
     lastRPMdelta[ch] = lTime - dwellBeginTime[ch];
 
-    unsigned long delayForRetard = (currRetard / cfg.wastedSpark) * (lTime - dwellBeginTime[ch]);
+    // Calculates the delay needed to retard the following ignition pulse by currRetard degrees (starting to charge coil right now)
+    unsigned long delayForRetard = (currRetard / cfg.wastedSpark) * (lastRPMdelta[ch]);
 
+    // If shift cut is over, smoothly ramp ignition retard back to 0 in currRestore step size
     if (!shiftingTrig && currRetard > 0) {
       currRetard = max(0, currRetard - currRestore);
     }
@@ -472,10 +483,16 @@ void coilInterrupt(int ch)
     // Either actively retarding ignition or recovering
     if (currRetard > 0)
     {
-      if (shiftingTrig && cfg.fullCut)
+      if (shiftingTrig && cfg.fullCut && cfg.staggeredCut)
       {
-        delayForRetard += ((currHoldTime*1000 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
-        shiftingTrig = false;
+        // This lets every cfg.staggeredCut-th ignition pulse go through so you don't collect as much fuel in the exhaust as with a true full cut
+        // Should reduce strain on the valvetrain etc. but still do nice pops
+        // Problem right now: If full cut would be 7 cycles and you set cfg.staggeredCut to 2 it will do 4 * 2 pulse intervals -> too long
+        // but should be good to test if it actually works like expected
+        delayForRetard += cfg.staggeredCut * lastRPMdelta[ch];
+
+        // delayForRetard += ((currHoldTime*1000 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
+        // shiftingTrig = false;
       }
 
       digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
@@ -600,7 +617,7 @@ void loop()
       }
 
       if (cfg.limiterAlways)
-        limiterState = PIT;                                    // TODO: Possible conflict with decelRetarding
+        limiterState = PIT;
 
       lastButtonState = buttonPressed;
 
