@@ -58,10 +58,10 @@ hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
 const int IGBT_PINS[4]    = {2, 3, 4, 1};
-//const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
-const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
+const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
+//const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
 
-const int WHEEL_PIN = 14; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
+const int WHEEL_PIN = 15; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
 const int PIEZO_PIN = 13;
 const int GREEN_PIN = 5;
 const int RED_PIN   = 6;
@@ -450,7 +450,7 @@ void IRAM_ATTR on_t1_cut()
 void IRAM_ATTR on_t2_cut()
 {
   // digitalWrite(IGBT_PINS[2], HIGH);
-  GPIO.out_w1ts = (1 <<(IGBT_PINS[2]);
+  GPIO.out_w1ts = (1 <<IGBT_PINS[2]);
 }
 void IRAM_ATTR on_t3_cut()
 {
