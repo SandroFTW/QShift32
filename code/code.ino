@@ -19,6 +19,10 @@
 
 #include <Arduino.h>
 
+#include "soc/gpio_struct.h"
+#include "soc/gpio_reg.h"
+#include "driver/gpio.h"
+
 WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Global variables
@@ -54,10 +58,10 @@ hw_timer_t *t_cut[4]  = {NULL, NULL, NULL, NULL};
 // Pin definitions
 const int HALL_PINS[2]    = {10, 11};
 const int IGBT_PINS[4]    = {2, 3, 4, 1};
-//const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
-const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
+const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
+//const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
 
-const int WHEEL_PIN = 14; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
+const int WHEEL_PIN = 15; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
 const int PIEZO_PIN = 13;
 const int GREEN_PIN = 5;
 const int RED_PIN   = 6;
@@ -444,19 +448,23 @@ void push_debug(void *parameters)
 // Gets executed when (lastDwell + calculated delay) passed after shifting
 void IRAM_ATTR on_t0_cut()
 {
-  digitalWrite(IGBT_PINS[0], HIGH);
+  // digitalWrite(IGBT_PINS[0], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[0]);
 }
 void IRAM_ATTR on_t1_cut()
 {
-  digitalWrite(IGBT_PINS[1], HIGH);
+  // digitalWrite(IGBT_PINS[1], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[1]);
 }
 void IRAM_ATTR on_t2_cut()
 {
-  digitalWrite(IGBT_PINS[2], HIGH);
+  // digitalWrite(IGBT_PINS[2], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[2]);
 }
 void IRAM_ATTR on_t3_cut()
 {
-  digitalWrite(IGBT_PINS[3], HIGH);
+  // digitalWrite(IGBT_PINS[3], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[3]);
 }
 
 // When ECU changes state of coil (pull low or release)
@@ -495,7 +503,8 @@ void coilInterrupt(int ch)
         // shiftingTrig = false;
       }
 
-      digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
+      // digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
+      GPIO.out_w1tc = (1 << IGBT_PINS[ch]);
       timerWrite(t_cut[ch], 0);
       timerAlarm(t_cut[ch], lastDwellTime[ch] + delayForRetard, false, 0);
     }
@@ -704,7 +713,8 @@ void loop()
 
       waitHyst = true;
 
-      digitalWrite(GREEN_PIN, LOW); // On when shifting
+      // digitalWrite(GREEN_PIN, LOW); // On when shifting
+      GPIO.out_w1tc = (1 << GREEN_PIN);
 
       lastCut = currTime;
     }
@@ -712,7 +722,8 @@ void loop()
     if (shiftingTrig && (currTime - lastCut) >= currHoldTime*1000)
     {
       shiftingTrig = false;
-      digitalWrite(GREEN_PIN, HIGH); // Off
+      // digitalWrite(GREEN_PIN, HIGH); // Off
+      GPIO.out_w1ts = (1 << GREEN_PIN);
     }
 
     lastCycle = currTime;
