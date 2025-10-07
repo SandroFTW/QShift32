@@ -12,6 +12,8 @@ This can either be used to fully prevent sparks from firing or delay them by a p
 
 [**Demonstration Video**](https://www.youtube.com/watch?v=TwFzDqyh4EY)
 
+[**Latest feature development: staggered cut**](https://youtu.be/_X9n1uwMxqk)
+
 
 R1 PCB 3D model:
 
