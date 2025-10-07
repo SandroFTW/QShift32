@@ -19,6 +19,10 @@
 
 #include <Arduino.h>
 
+#include "soc/gpio_struct.h"
+#include "soc/gpio_reg.h"
+#include "driver/gpio.h"
+
 WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Global variables
@@ -419,7 +423,7 @@ void push_debug(void *parameters)
     //String sTrig = shiftingTrig ? "true" : "false";
     String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
 
-    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMRate) + ","
+    String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastRPMdelta[0]) + ","
                            + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
                            + String(lastWheelSpeed) +            "," + lMode;
 
@@ -435,19 +439,23 @@ void push_debug(void *parameters)
 // Gets executed when (lastDwell + calculated delay) passed after shifting
 void IRAM_ATTR on_t0_cut()
 {
-  digitalWrite(IGBT_PINS[0], HIGH);
+  // digitalWrite(IGBT_PINS[0], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[0]);
 }
 void IRAM_ATTR on_t1_cut()
 {
-  digitalWrite(IGBT_PINS[1], HIGH);
+  // digitalWrite(IGBT_PINS[1], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[1]);
 }
 void IRAM_ATTR on_t2_cut()
 {
-  digitalWrite(IGBT_PINS[2], HIGH);
+  // digitalWrite(IGBT_PINS[2], HIGH);
+  GPIO.out_w1ts = (1 <<(IGBT_PINS[2]);
 }
 void IRAM_ATTR on_t3_cut()
 {
-  digitalWrite(IGBT_PINS[3], HIGH);
+  // digitalWrite(IGBT_PINS[3], HIGH);
+  GPIO.out_w1ts = (1 << IGBT_PINS[3]);
 }
 
 // When ECU changes state of coil (pull low or release)
@@ -478,7 +486,8 @@ void coilInterrupt(int ch)
         shiftingTrig = false;
       }
 
-      digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
+      // digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
+      GPIO.out_w1tc = (1 << IGBT_PINS[ch]);
       timerWrite(t_cut[ch], 0);
       timerAlarm(t_cut[ch], lastDwellTime[ch] + delayForRetard, false, 0);
     }
@@ -508,9 +517,11 @@ void setup()
 
   // LED
   pinMode(GREEN_PIN, OUTPUT);
-  digitalWrite(GREEN_PIN, HIGH); // Off default
+  // digitalWrite(GREEN_PIN, HIGH); // Off default
+  GPIO.out_w1ts = (1 << GREEN_PIN);
   pinMode(RED_PIN, OUTPUT);
-  digitalWrite(RED_PIN, HIGH); // Off default
+  // digitalWrite(RED_PIN, HIGH); // Off default
+  GPIO.out_w1ts = (1 << RED_PIN);
 
   // Hall, Piezo
   int adcPins[4] = {HALL_PINS[0], HALL_PINS[1], PIEZO_PIN, WHEEL_PIN};
@@ -521,7 +532,8 @@ void setup()
   // Ignition IGBT and measurement (set all 4 channels)
   for (int i = 0; i < 4; i++) {
     pinMode(IGBT_PINS[i], OUTPUT);
-    digitalWrite(IGBT_PINS[i], HIGH); // Open IGBT default
+    // digitalWrite(IGBT_PINS[i], HIGH); // Open IGBT default
+    GPIO.out_w1ts = (1 << IGBT_PINS[i]);
 
     pinMode(MEASURE_PINS[i], INPUT);
   }
@@ -687,7 +699,8 @@ void loop()
 
       waitHyst = true;
 
-      digitalWrite(GREEN_PIN, LOW); // On when shifting
+      // digitalWrite(GREEN_PIN, LOW); // On when shifting
+      GPIO.out_w1tc = (1 << GREEN_PIN);
 
       lastCut = currTime;
     }
@@ -695,7 +708,8 @@ void loop()
     if (shiftingTrig && (currTime - lastCut) >= currHoldTime*1000)
     {
       shiftingTrig = false;
-      digitalWrite(GREEN_PIN, HIGH); // Off
+      // digitalWrite(GREEN_PIN, HIGH); // Off
+      GPIO.out_w1ts = (1 << GREEN_PIN);
     }
 
     lastCycle = currTime;
