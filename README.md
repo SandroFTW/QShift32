@@ -30,8 +30,11 @@ R1 PCB 3D model:
 - Expandable to support handlebar buttons, gear indicator, shift light (not implemented yet), etc.
 
 
-(Ignore the broken wire please ;) )
+
 <img src='images/qshift_hall.jpg' width='250'>
+
+My DIY hall based pressure sensor with CNC aluminium parts and 3d printed hotbed springs (die cast springs)
+(Ignore the broken wire please ;) )
 
 ## Easy configuration
 Use any smartphone to connect to the WiFi Access Point opened by QShift32.
