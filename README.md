@@ -29,6 +29,8 @@ R1 PCB 3D model:
 - Precise dwell time and time per revolution measurement for each channel (1 µs precision)
 - Expandable to support handlebar buttons, gear indicator, shift light (not implemented yet), etc.
 
+<img src='images/qshift_hall.jpg' width='350'>
+
 ## Easy configuration
 Use any smartphone to connect to the WiFi Access Point opened by QShift32.
 IP Adress 192.168.4.1 shows the configuration options.
