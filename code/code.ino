@@ -499,6 +499,17 @@ void coilInterrupt(int ch)
         // but should be good to test if it actually works like expected
         delayForRetard += cfg.staggeredCut * lastRPMdelta[ch];
 
+        // This hopefully solves the issue described above.
+        // If the expected time to finish the next sub-cut cycle (skip n/staggeredCut ignition cycles) is more than lastRPMdelta (the time between two ignition pulses)
+        // it will subtract until it isn't.
+        // That way the shift will take a maximum of lastRPMdelta more time than currHoldTime wants it to be.
+        // At 7000 RPM 4-cyl wasted spark this would be 8.6ms too much in the absolutele worst case, good enough :)
+        // Without this the actual cutTime could have been more than double of what it should have been
+        while (currTime + delayForRetard > lastCut + currHoldTime*1000 + lastRPMdelta[ch])
+        {
+          delayForRetard = max((uint32_t)0, delayForRetard - lastRPMdelta[ch]);
+        }
+
         // delayForRetard += ((currHoldTime*1000 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
         // shiftingTrig = false;
       }
