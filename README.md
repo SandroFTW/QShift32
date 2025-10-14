@@ -1,5 +1,5 @@
 # QShift32 - ESP32 based timing retard quickshifter module for motorcycles
-This project is basically a big revision of my other project "quickshiftuino".
+This project is basically a new revision of my other project "quickshiftuino".
 The differences are pretty big though, so I decided to create a new repository.
 
 "**quickshiftuino**" had 2 channels that could cut the power to the ignition coils on the high side (P-Mos).
@@ -54,7 +54,7 @@ It prevents ignition pulses for a set time and then slowly reintroduces engine p
 ## Next steps (high to low priority)
 - Upload more pictures and write easy-to-follow build instructions and documentation
 - Improve code structure, efficiency and write more code documentation
-- Try to reduce the ammount of configuration options for simlicity
+- Try to reduce the amount of configuration options for simplicity
 - Find a way to reliably measure variable reluctance wheel speed sensors (only 0-5V hall type working right now)
 - Design a case that holds the PCB and connectors (ideally somewhat water splash proof)
 - Find a way of controlling multiple channels simultaneously with a single timer (very low priority)
