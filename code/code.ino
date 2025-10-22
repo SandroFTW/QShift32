@@ -27,7 +27,6 @@ WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Global variables
 volatile unsigned long currTime          = 0;     // current timestamp in 1 µs steps (1 MHz)
-volatile unsigned long speedPulses       = 0;     // Pulse count from the wheel speed sensor in the last interval (500 ms / 2 Hz)
 volatile unsigned long dwellBeginTime[4] = {0};   // time of last dwell start in µs steps
 volatile unsigned long lastDwellTime[4]  = {0};   // duration of last dwell pulse in µs steps
 volatile unsigned long lastRPMdelta[4]   = {0};   // Stores time bewteen two ignition pulses, needed for RPM calculation
@@ -40,12 +39,10 @@ volatile int currRestore                 = 0;     // Calculated deg/ignition pul
 unsigned long lastCycle           = 0;     // When was the last main loop cycle (1 kHz)
 unsigned long lastRead            = 0;     // When was the last ADC sensor reading (20 Hz)
 unsigned long lastCut             = 0;     // When was the last ignition cut/retard begin
-unsigned long lastSpeedRead       = 0;     // When was the last rear wheel speed measurement (2 Hz)
 
 int currHoldTime                  = 0;     // Interpolated hold time based on current RPM and low/high time
+int currStag                      = 0;     // Backup the cfg.staggeredCut value for toggling via button
 int lastRPM                       = 0;
-int lastWheelRPM                  = 0;     // Measured rear wheel speed (1/min)
-float lastWheelSpeed              = 0;     // Calculated rear wheel speed (km/h)
 int pressureValue                 = 0;     // Piezo/Hall sensor pressure value
 int limiterState                  = 0;     // Current state of RPM limiter mode
 bool buttonPressed                = false; // Handlebar button state
@@ -61,16 +58,9 @@ const int IGBT_PINS[4]    = {2, 3, 4, 1};
 const int MEASURE_PINS[4] = {9, 14, 7, 8}; // Handwired first revision (xj6)
 //const int MEASURE_PINS[4] = {9, 7, 8, 12}; // PCB Design Pins (grom, R3b)
 
-const int WHEEL_PIN = 15; // 12 on my grom, 15 on my xj6, 14 in R3b PCB revision
 const int PIEZO_PIN = 13;
 const int GREEN_PIN = 5;
 const int RED_PIN   = 6;
-
-enum lim {
-  OFF = 0,
-  LAUNCH = 1,
-  PIT = 2
-};
 
 String params = "["
   "{"
@@ -96,7 +86,7 @@ String params = "["
   "'label':'Ignition Retard - High RPM (deg)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':180,"
-  "'default':'60'"
+  "'default':'50'"
   "},"
   "{"
   "'name':'restore',"
@@ -159,7 +149,7 @@ String params = "["
   "'label':'Staggered Cut Cycles (0-8)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':8,"
-  "'default':'4'"
+  "'default':'2'"
   "},"
   "{"
   "'name':'fullCut',"
@@ -177,13 +167,7 @@ String params = "["
   "'name':'category2',"
   "'label':'2-Step RPM Limiter',"
   "'type':"+String(CATEGORY)+""
-  "},"
-  "{"
-  "'name':'limiterAlways',"
-  "'label':'Limiter Always Active',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'1'"
-  "},"
+  "}"
   "{"
   "'name':'limiterFullCut',"
   "'label':'Limiter Full Cut',"
@@ -195,14 +179,7 @@ String params = "["
   "'label':'Limiter RPM (1/min)',"
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':20000,"
-  "'default':'3600'"
-  "},"
-  "{"
-  "'name':'launchRPM',"
-  "'label':'Launch Control RPM (1/min)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':20000,"
-  "'default':'2500'"
+  "'default':'3500'"
   "},"
   "{"
   "'name':'limiterCut',"
@@ -217,20 +194,6 @@ String params = "["
   "'type':"+String(INPUTNUMBER)+","
   "'min':0,'max':180,"
   "'default':'30'"
-  "},"
-  "{"
-  "'name':'limiterDiv',"
-  "'label':'Limiter Restore Divisor',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':20,"
-  "'default':'1'"
-  "},"
-  "{"
-  "'name':'limiterMaxSpeed',"
-  "'label':'Limiter Max Speed (km/h)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':0,'max':1000,"
-  "'default':'15'"
   "},"
   "{"
   "'name':'category3',"
@@ -258,24 +221,14 @@ String params = "["
   "'default':'0'"
   "},"
   "{"
-  "'name':'wheelSensor',"
-  "'label':'Wheel Speed Sensor',"
-  "'type':"+String(INPUTCHECKBOX)+","
-  "'default':'0'"
-  "},"
-  "{"
-  "'name':'speedScale',"
-  "'label':'Wheel Circumference (mm)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':20000,"
-  "'default':'1528'"                             // Grom 15/34 (Sprocket) * 1529 (Wheel Dia mm) = 675 (Distance per rear wheel rev)
-  "},"
-  "{"
-  "'name':'sensorPulses',"
-  "'label':'Pulses per Wheel Revolution',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':1000,"
-  "'default':'70'"
+  "'name':'buttonMode',"
+  "'label':'Button Mode',"
+  "'type':"+String(INPUTSELECT)+","
+  "'options':["
+  "{'v':'0','l':'Disabled'},"
+  "{'v':'1','l':'Limiter Hold'},"
+  "{'v':'2','l':'Staggered Toggle'}],"
+  "'default':'2'"
   "}"
   "]";
 
@@ -305,20 +258,14 @@ struct cfgOptions
   bool fullCut;
   float wastedSpark;
 
-  bool limiterAlways;
   bool limiterFullCut;
   int limiterRPM;
-  int launchRPM;
   int limiterCut;
   int limiterRetard;
-  int limiterDiv;
-  int limiterMaxSpeed;
 
   int pressureInput;
   int buttonInput;
-  bool wheelSensor;
-  int speedScale;
-  int sensorPulses;
+  int buttonMode;
 } cfg;
 
 void transferWebconfToStruct(String results)
@@ -337,21 +284,19 @@ void transferWebconfToStruct(String results)
   cfg.cutSens = conf.getInt("cutSens");
   cfg.cutHyst = conf.getInt("cutHyst");
   cfg.staggeredCut = conf.getInt("staggeredCut");
+  currStag = cfg.staggeredCut;
 
   cfg.fullCut = conf.getBool("fullCut");
   cfg.wastedSpark = conf.getBool("wastedSpark") ? 360.f : 720.f;
 
-  cfg.limiterAlways = conf.getBool("limiterAlways");
   cfg.limiterFullCut = conf.getBool("limiterFullCut");
   cfg.limiterRPM = conf.getInt("limiterRPM");
-  cfg.launchRPM = conf.getInt("launchRPM");
   cfg.limiterCut = conf.getInt("limiterCut");
   cfg.limiterRetard = conf.getInt("limiterRetard");
-  cfg.limiterDiv = conf.getInt("limiterDiv");
-  cfg.limiterMaxSpeed = conf.getInt("limiterMaxSpeed");
 
   String pres = conf.getString("pressureInput").c_str();
   String butt = conf.getString("buttonInput").c_str();
+  String buttMode = conf.getString("buttonMode").c_str();
 
   if (pres == "0")
     cfg.pressureInput = 0; // Piezo
@@ -367,9 +312,12 @@ void transferWebconfToStruct(String results)
   else if (butt == "2")
     cfg.buttonInput = 2; // ADC 2
 
-  cfg.wheelSensor = conf.getInt("wheelSensor");
-  cfg.speedScale = conf.getInt("speedScale");
-  cfg.sensorPulses = conf.getInt("sensorPulses");
+  if (buttMode == "0")
+    cfg.buttonMode = 0; // None
+  else if (buttMode == "1")
+    cfg.buttonMode = 1; // Limiter Toggle
+  else if (buttMode == "2")
+    cfg.buttonMode = 2; // Staggered Toggle
 }
 
 const char debug_html[] PROGMEM = R"rawliteral(
@@ -388,9 +336,6 @@ const char debug_html[] PROGMEM = R"rawliteral(
   <p id="val4">...</p>
   <p id="val5">...</p>
   <p id="val6">...</p>
-  <br>
-  <p id="val7">...</p>
-  <p id="val8">...</p>
   <script>
     const valEl1 = document.getElementById('val1');
     const valEl2 = document.getElementById('val2');
@@ -398,20 +343,16 @@ const char debug_html[] PROGMEM = R"rawliteral(
     const valEl4 = document.getElementById('val4');
     const valEl5 = document.getElementById('val5');
     const valEl6 = document.getElementById('val6');
-    const valEl7 = document.getElementById('val7');
-    const valEl8 = document.getElementById('val8');
     const ws = new WebSocket(`ws://${location.hostname}:81/`);
 
     ws.onmessage = function(event) {
-      const [val1, val2, val3, val4, val5, val6, val7, val8] = event.data.split(",");
+      const [val1, val2, val3, val4, val5, val6] = event.data.split(",");
       valEl1.innerText = `Pressure: ${val1}`;
       valEl2.innerText = `RPM: ${val2}`;
       valEl3.innerText = `lastDwell[0]: ${val3}`;
       valEl4.innerText = `targetRetard: ${val4}`;
       valEl5.innerText = `currHoldTime: ${val5}`;
       valEl6.innerText = `currRestore: ${val6}`;
-      valEl7.innerText = `Speed (km/h): ${val7}`;
-      valEl8.innerText = `Limiter Mode: ${val8}`;
     };
   </script>
 </body>
@@ -429,12 +370,8 @@ void push_debug(void *parameters)
 {
   for (;;)
   {
-    //String sTrig = shiftingTrig ? "true" : "false";
-    String lMode = limiterState == OFF ? "OFF" : (limiterState == PIT ? "PIT" : (limiterState == LAUNCH ? "LAUNCH" : "error"));
-
     String broadcastString = String(pressureValue) +                "," + String(lastRPM) +       "," + String(lastDwellTime[0]) + ","
-                           + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore) + ","
-                           + String(lastWheelSpeed) +            "," + lMode;
+                           + String(currRetard) +                "," + String(currHoldTime) +  "," + String(currRestore);
 
     webSocket.loop();
     webSocket.broadcastTXT(broadcastString);
@@ -448,22 +385,18 @@ void push_debug(void *parameters)
 // Gets executed when (lastDwell + calculated delay) passed after shifting
 void IRAM_ATTR on_t0_cut()
 {
-  // digitalWrite(IGBT_PINS[0], HIGH);
   GPIO.out_w1ts = (1 << IGBT_PINS[0]);
 }
 void IRAM_ATTR on_t1_cut()
 {
-  // digitalWrite(IGBT_PINS[1], HIGH);
   GPIO.out_w1ts = (1 << IGBT_PINS[1]);
 }
 void IRAM_ATTR on_t2_cut()
 {
-  // digitalWrite(IGBT_PINS[2], HIGH);
   GPIO.out_w1ts = (1 << IGBT_PINS[2]);
 }
 void IRAM_ATTR on_t3_cut()
 {
-  // digitalWrite(IGBT_PINS[3], HIGH);
   GPIO.out_w1ts = (1 << IGBT_PINS[3]);
 }
 
@@ -491,13 +424,13 @@ void coilInterrupt(int ch)
     // Either actively retarding ignition or recovering
     if (currRetard > 0)
     {
-      if (shiftingTrig && cfg.fullCut && cfg.staggeredCut)
+      if (shiftingTrig && cfg.fullCut && currStag) // TODO: get rid of cfg.fullCut, do normal operation when staggeredCut = 0
       {
         // This lets every cfg.staggeredCut-th ignition pulse go through so you don't collect as much fuel in the exhaust as with a true full cut
         // Should reduce strain on the valvetrain etc. but still do nice pops
         // Problem right now: If full cut would be 7 cycles and you set cfg.staggeredCut to 2 it will do 4 * 2 pulse intervals -> too long
         // but should be good to test if it actually works like expected
-        delayForRetard += cfg.staggeredCut * lastRPMdelta[ch];
+        delayForRetard += currStag * lastRPMdelta[ch];
 
         // This hopefully solves the issue described above.
         // If the expected time to finish the next sub-cut cycle (skip n/staggeredCut ignition cycles) is more than lastRPMdelta (the time between two ignition pulses)
@@ -509,13 +442,9 @@ void coilInterrupt(int ch)
         {
           delayForRetard = max((uint32_t)0, delayForRetard - lastRPMdelta[ch]);
         }
-
-        // delayForRetard += ((currHoldTime*1000 / lastRPMdelta[ch]) + 1) * lastRPMdelta[ch];
-        // shiftingTrig = false;
       }
 
-      // digitalWrite(IGBT_PINS[ch], LOW); // Close IGBT
-      GPIO.out_w1tc = (1 << IGBT_PINS[ch]);
+      GPIO.out_w1tc = (1 << IGBT_PINS[ch]); // Close IGBT
       timerWrite(t_cut[ch], 0);
       timerAlarm(t_cut[ch], lastDwellTime[ch] + delayForRetard, false, 0);
     }
@@ -534,11 +463,6 @@ void IRAM_ATTR onPC1() { coilInterrupt(1); }
 void IRAM_ATTR onPC2() { coilInterrupt(2); }
 void IRAM_ATTR onPC3() { coilInterrupt(3); }
 
-void IRAM_ATTR onWheelSpeed()
-{
-  speedPulses++;
-}
-
 void setup()
 {
   Serial.begin(57600);
@@ -550,8 +474,8 @@ void setup()
   digitalWrite(RED_PIN, HIGH); // Off default
 
   // Hall, Piezo
-  int adcPins[4] = {HALL_PINS[0], HALL_PINS[1], PIEZO_PIN, WHEEL_PIN};
-  for (int i = 0; i < 4; i++) {
+  int adcPins[3] = {HALL_PINS[0], HALL_PINS[1], PIEZO_PIN};
+  for (int i = 0; i < 3; i++) {
     pinMode(adcPins[i], INPUT);
   }
 
@@ -574,9 +498,6 @@ void setup()
   for (int i = 0; i < 4; i++) {
     attachInterrupt(digitalPinToInterrupt(MEASURE_PINS[i]), pcFuncs[i], CHANGE);
   }
-
-  // Rear wheel speed sensing
-  attachInterrupt(digitalPinToInterrupt(WHEEL_PIN), onWheelSpeed, RISING);
 
   conf.setDescription(params);
   conf.readConfig();
@@ -616,28 +537,26 @@ void loop()
 
       pressureValue = analogRead(inputs[cfg.pressureInput]);
       if (cfg.pressureInput == 0)
-        pressureValue = 4095 - pressureValue;
+        pressureValue = 4095 - pressureValue; // TODO: Rethink if this makes any sense or if it's obsolete
       
       buttonPressed = cfg.buttonInput ? !digitalRead(inputs[cfg.buttonInput]) : false;
 
       if (buttonPressed && !lastButtonState)
       {
-        switch (limiterState)
+        switch (cfg.buttonMode)
         {
-          case PIT:    limiterState = OFF; break;
-          case LAUNCH: limiterState = OFF; break;
+          case 0: if (limitingRPM)
+                  {
+                    limitingRPM = false;
+                    shiftingTrig = false;
+                    cfg.fullCut = conf.getBool("fullCut");
+                  }
+                  break;
 
-          case OFF:
-            if (lastWheelSpeed < cfg.limiterMaxSpeed && cfg.wheelSensor)
-              limiterState = LAUNCH;
-            else
-              limiterState = PIT;
-            break;
+          case 1: limitingRPM = true; break;
+          case 2: if (cfg.staggeredCut) currStag = currStag ? 0 : cfg.staggeredCut; break; // TODO: I think this needs two presses on first use to actually toggle
         }
       }
-
-      if (cfg.limiterAlways)
-        limiterState = PIT;
 
       lastButtonState = buttonPressed;
 
@@ -650,65 +569,19 @@ void loop()
       lastRead = currTime;
     }
 
-    // Read wheel speed every 500 ms (2 Hz)
-    if (cfg.wheelSensor && (currTime - lastSpeedRead) >= 500000)
-    {
-      lastWheelRPM = (int)(speedPulses * (120 / (float)cfg.sensorPulses));
-      speedPulses = 0;
-
-      lastWheelSpeed = (lastWheelRPM * cfg.speedScale) / 60000.f;
-
-      lastSpeedRead = currTime;
-    }
-
     if (pressureValue < (cfg.cutSens - cfg.cutHyst))
       waitHyst = false;
 
     // 2-step launch control
-    if ((cfg.launchRPM || cfg.limiterRPM) && cfg.limiterCut && cfg.limiterRetard)
+    if (limitingRPM && cfg.limiterRPM && cfg.limiterCut && cfg.limiterRetard && lastRPM > cfg.limiterRPM && !shiftingTrig)
     {
-      switch (limiterState)
-      {
-        case LAUNCH:
-          if (lastWheelSpeed > cfg.limiterMaxSpeed)
-            limiterState = OFF;
-
-          if (cfg.launchRPM && lastRPM > cfg.launchRPM && !shiftingTrig)
-          {
-            shiftingTrig = true;
-            limitingRPM = true;
-            waitHyst = true;
-            currRetard = cfg.limiterRetard;
-            currHoldTime = min((int)((lastRPM - cfg.launchRPM) * cfg.limiterCut / 100.f), 200); // rpmError * gain and limit to 200 ms
-            currRestore = (int)(cfg.limiterRetard / cfg.limiterDiv);
-            cfg.fullCut = cfg.limiterFullCut;
-            lastCut = currTime;
-          }
-          break;
-
-        case PIT:
-          if (cfg.limiterRPM && lastRPM > cfg.limiterRPM && !shiftingTrig)
-          {
-            shiftingTrig = true;
-            limitingRPM = true;
-            waitHyst = true;
-            currRetard = cfg.limiterRetard;
-            currHoldTime = min((int)((lastRPM - cfg.limiterRPM) * cfg.limiterCut / 100.f), 200); // rpmError * gain and limit to 200 ms
-            currRestore = (int)(cfg.limiterRetard / cfg.limiterDiv);
-            cfg.fullCut = cfg.limiterFullCut;
-            lastCut = currTime;
-          }
-          break;
-
-        case OFF:
-          if (limitingRPM)
-          {
-            limitingRPM = false;
-            shiftingTrig = false;
-            cfg.fullCut = conf.getBool("fullCut");
-          }
-          break;
-      }
+      shiftingTrig = true;
+      waitHyst = true;
+      currRetard = cfg.limiterRetard;
+      currHoldTime = min((int)((lastRPM - cfg.limiterRPM) * cfg.limiterCut / 100.f), 200); // rpmError * gain and limit to 200 ms
+      currRestore = cfg.limiterRetard; // TODO: think of nicer RPM limit algorithm that doesnt need cfg.limiterDiv or similar
+      cfg.fullCut = cfg.limiterFullCut;
+      lastCut = currTime;
     }
 
     if (lastRPM < cfg.minRPM)
@@ -724,8 +597,7 @@ void loop()
 
       waitHyst = true;
 
-      // digitalWrite(GREEN_PIN, LOW); // On when shifting
-      GPIO.out_w1tc = (1 << GREEN_PIN);
+      GPIO.out_w1tc = (1 << GREEN_PIN); // On when shifting
 
       lastCut = currTime;
     }
@@ -733,8 +605,7 @@ void loop()
     if (shiftingTrig && (currTime - lastCut) >= currHoldTime*1000)
     {
       shiftingTrig = false;
-      // digitalWrite(GREEN_PIN, HIGH); // Off
-      GPIO.out_w1ts = (1 << GREEN_PIN);
+      GPIO.out_w1ts = (1 << GREEN_PIN); // LED Off
     }
 
     lastCycle = currTime;
